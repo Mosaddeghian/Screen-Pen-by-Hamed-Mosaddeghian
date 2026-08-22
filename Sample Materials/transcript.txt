@@ -1,0 +1,117 @@
+I want to create an app like Epic Pen, as you can see on the picture, this is Epic Pen. You can search it for myself to use it on Windows iOS. I want to use it on my iPad and on Android. I want to use it on my Android tablet as well. I want it to be a little bit more customizable than Epic Pen. I want it to have some more features. Now, let's see what Epic Pen has. First of all, Epic Pen has a whiteboard and a blackboard. The good thing about Epic Pen is that it is a slim bar over here that I can hide it like this. It's an interesting UI design. But it has a whiteboard and a blackboard. You can see the use cases right now. There is a little problem with this whiteboard and blackboard. I want this on my iPad. But when I choose whiteboard or blackboard, two things happen that I don't really appreciate. The first thing is that I have more than three displays here. I have more than one monitor. When I press whiteboard or blackboard, all of them go white or black, which is not ideal. I want just one monitor to be used as whiteboard. The monitor or the display that has the application on it right now. If it's in this play, it should just turn this display into a whiteboard or a blackboard. For example, display number one. The other thing is that it hides the taskbar as well, which should be optional. I should be able to decide if it covers the taskbar or not. This is the first. The second thing that is very good is that it has two mouse options. One of them is like this and the mouse is more clear. I like this. This is a good option. I don't need this option. I don't even know what it does, so I don't need it. Fade link and maybe it's a good one. Let's keep it if we can. I need the pen. It's a very good option. It's good. I need text, but I need text in a separate icon. The text is under pen right now, pen category. I want it to be separate. We have a pen toggle here and a text toggle, for example. Line and rectangle also should be in different toggles. This is very important. Now, I want to customize a bar so I can, for example, have two or three toggles for rectangle, not just one. For example, this is something that I use a lot. I want to be able to draw a rectangle on my display, but I want one of them to be filled, for example. I would be able to choose if it's a filled rectangle, like for example this one. I make it a little bit bigger for you. Let's imagine that this is a rectangle. It's a filled rectangle. I want them to be different colors. For example, the first rectangle up here would be always in one color, and the other one would be down there, one toggle down of the upper one, and it would be in another color. When I choose an epic pen, when I choose a color, it applies to all the tools. This is not perfect. Every tool should be its own color. For example, if I want to draw a filled rectangle with, for example, blue right here, and I want to draw another rectangle with red or something, I should have two different rectangles here, and I can draw faster. The eraser is a very good option. I like it. It acts very good. With one click, it gets rid of everything. I like it. I need it. The size choosing is very good. So I choose this one, and the rectangle goes thicker. The lines become thicker. I like to have this for every tool individually. For example, for pen, when I choose a thicker line, pen is thicker. Also the rectangle is thicker. Also the line is thicker. It's not the perfect option. I want everyone to have their own thickness. The undo button is very useful. The delete button is a trash button. It's very good. It gets rid of everything. These must be there. The screenshot is good, but here's the problem. It takes a screenshot from something, for example, everything, but I don't know where it saves it. It should be an option that I know where it saves it and stuff like that. The menu is good. I have settings here. I can choose some stuff, which is pretty good. I have to check the settings. It's the first time I'm opening it. It's a good setting. Make sure that we understand the setting. I want more quick colors than just maybe four is good. I want a palette here, so I can choose. I have it here. I didn't know that. It's a palette. I can choose a different color and it will draw that. It's a good thing. Let's make this app and also a very important thing that I forgot. I usually write on charts and stuff like that. Here's a problem. When I turn on the whiteboard, it's perfect. When I turn off the whiteboard right now, the lines and everything is still there on the screen. No. When I want to write on the screen, I will write on the screen. When I want to write on the whiteboard, I will write on the whiteboard. When I write on the whiteboard or blackboard and I turn it off, the lines should go away from the screen, but the lines that I already made on the screen, they should be here. It should be on the screen until I clean them or delete them. The lines and everything else that I put on the whiteboard or blackboard should be on the blackboard or whiteboard when I turn them on again. These will be a better understanding. The whiteboard, the blackboard and the screen, there should be three separate spaces.
+
+---SEGMENTS---
+[0.0-11.4] I want to create an app like Epic Pen, as you can see on the picture, this is Epic Pen.
+[11.4-19.7] You can search it for myself to use it on Windows iOS.
+[19.7-25.0] I want to use it on my iPad and on Android.
+[25.0-28.4] I want to use it on my Android tablet as well.
+[29.4-39.4] I want it to be a little bit more customizable than Epic Pen.
+[39.4-41.6] I want it to have some more features.
+[41.6-45.3] Now, let's see what Epic Pen has.
+[45.3-50.4] First of all, Epic Pen has a whiteboard and a blackboard.
+[50.4-58.4] The good thing about Epic Pen is that it is a slim bar over here that I can hide it like this.
+[59.0-67.1] It's an interesting UI design.
+[67.1-71.4] But it has a whiteboard and a blackboard.
+[71.4-75.6] You can see the use cases right now.
+[75.6-81.2] There is a little problem with this whiteboard and blackboard.
+[81.2-84.9] I want this on my iPad.
+[84.9-95.6] But when I choose whiteboard or blackboard, two things happen that I don't really appreciate.
+[95.6-103.8] The first thing is that I have more than three displays here.
+[103.8-107.4] I have more than one monitor.
+[107.4-115.6] When I press whiteboard or blackboard, all of them go white or black, which is not ideal.
+[115.6-122.6] I want just one monitor to be used as whiteboard.
+[122.6-130.9] The monitor or the display that has the application on it right now.
+[130.9-145.3] If it's in this play, it should just turn this display into a whiteboard or a blackboard.
+[145.3-148.6] For example, display number one.
+[148.6-156.0] The other thing is that it hides the taskbar as well, which should be optional.
+[156.0-168.0] I should be able to decide if it covers the taskbar or not.
+[168.0-169.2] This is the first.
+[169.2-177.4] The second thing that is very good is that it has two mouse options.
+[177.4-182.0] One of them is like this and the mouse is more clear.
+[182.0-183.0] I like this.
+[183.0-184.3] This is a good option.
+[184.3-185.6] I don't need this option.
+[185.6-192.3] I don't even know what it does, so I don't need it.
+[192.3-197.5] Fade link and maybe it's a good one.
+[197.5-200.6] Let's keep it if we can.
+[200.6-201.8] I need the pen.
+[201.8-206.6] It's a very good option.
+[206.6-207.6] It's good.
+[207.6-212.6] I need text, but I need text in a separate icon.
+[212.6-219.3] The text is under pen right now, pen category.
+[219.3-222.0] I want it to be separate.
+[222.0-230.6] We have a pen toggle here and a text toggle, for example.
+[230.6-235.7] Line and rectangle also should be in different toggles.
+[235.7-236.7] This is very important.
+[236.7-250.8] Now, I want to customize a bar so I can, for example, have two or three toggles for rectangle,
+[250.8-252.8] not just one.
+[252.8-259.4] For example, this is something that I use a lot.
+[259.4-271.2] I want to be able to draw a rectangle on my display, but I want one of them to be filled,
+[271.2-272.2] for example.
+[272.2-281.1] I would be able to choose if it's a filled rectangle, like for example this one.
+[281.1-284.9] I make it a little bit bigger for you.
+[284.9-288.7] Let's imagine that this is a rectangle.
+[289.6-292.3] It's a filled rectangle.
+[292.3-295.6] I want them to be different colors.
+[295.6-304.2] For example, the first rectangle up here would be always in one color, and the other one
+[304.2-316.2] would be down there, one toggle down of the upper one, and it would be in another color.
+[316.2-326.2] When I choose an epic pen, when I choose a color, it applies to all the tools.
+[326.2-328.5] This is not perfect.
+[328.5-331.0] Every tool should be its own color.
+[331.0-339.4] For example, if I want to draw a filled rectangle with, for example, blue right here, and I
+[339.4-352.3] want to draw another rectangle with red or something, I should have two different rectangles
+[352.3-357.4] here, and I can draw faster.
+[357.4-360.0] The eraser is a very good option.
+[360.0-361.0] I like it.
+[361.0-364.0] It acts very good.
+[364.0-368.2] With one click, it gets rid of everything.
+[368.2-369.2] I like it.
+[369.2-370.2] I need it.
+[370.2-376.2] The size choosing is very good.
+[376.2-380.9] So I choose this one, and the rectangle goes thicker.
+[380.9-383.1] The lines become thicker.
+[383.1-387.3] I like to have this for every tool individually.
+[387.3-394.6] For example, for pen, when I choose a thicker line, pen is thicker.
+[394.6-397.6] Also the rectangle is thicker.
+[397.6-401.9] Also the line is thicker.
+[401.9-403.5] It's not the perfect option.
+[403.5-414.4] I want everyone to have their own thickness.
+[414.4-417.0] The undo button is very useful.
+[417.0-422.2] The delete button is a trash button.
+[422.2-423.2] It's very good.
+[423.4-424.6] It gets rid of everything.
+[424.6-427.6] These must be there.
+[427.6-431.3] The screenshot is good, but here's the problem.
+[431.3-437.6] It takes a screenshot from something, for example, everything, but I don't know where
+[437.6-439.7] it saves it.
+[439.7-444.7] It should be an option that I know where it saves it and stuff like that.
+[444.7-446.1] The menu is good.
+[446.1-447.6] I have settings here.
+[447.6-454.2] I can choose some stuff, which is pretty good.
+[454.2-457.0] I have to check the settings.
+[457.0-459.6] It's the first time I'm opening it.
+[459.6-466.0] It's a good setting.
+[466.0-471.0] Make sure that we understand the setting.
+[471.0-477.4] I want more quick colors than just maybe four is good.
+[478.3-481.6] I want a palette here, so I can choose.
+[481.6-482.8] I have it here.
+[482.8-483.8] I didn't know that.
+[483.8-485.3] It's a palette.
+[485.3-488.6] I can choose a different color and it will draw that.
+[488.6-490.9] It's a good thing.
+[490.9-500.9] Let's make this app and also a very important thing that I forgot.
+[500.9-505.1] I usually write on charts and stuff like that.
+[505.1-506.5] Here's a problem.
+[506.6-510.0] When I turn on the whiteboard, it's perfect.
+[510.0-516.0] When I turn off the whiteboard right now, the lines and everything is still there on
+[516.0-517.0] the screen.
+[517.0-519.2] No.
+[519.2-523.1] When I want to write on the screen, I will write on the screen.
+[523.1-526.6] When I want to write on the whiteboard, I will write on the whiteboard.
+[526.6-534.5] When I write on the whiteboard or blackboard and I turn it off, the lines should go away
+[534.5-544.0] from the screen, but the lines that I already made on the screen, they should be here.
+[544.0-552.2] It should be on the screen until I clean them or delete them.
+[552.2-562.7] The lines and everything else that I put on the whiteboard or blackboard should be on
+[562.7-567.3] the blackboard or whiteboard when I turn them on again.
+[567.3-570.9] These will be a better understanding.
+[570.9-578.5] The whiteboard, the blackboard and the screen, there should be three separate spaces.
