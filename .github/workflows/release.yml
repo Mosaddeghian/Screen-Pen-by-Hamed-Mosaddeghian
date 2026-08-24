@@ -1,0 +1,51 @@
+name: Build and Release Portable Version
+
+# This recipe runs automatically when you push a tag like "v1.2.1".
+# It builds the app, zips it as a portable version, and attaches the
+# zip to a GitHub Release so anyone can download it.
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Get the source code
+        uses: actions/checkout@v4
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.44.8
+          cache: true
+
+      - name: Download project dependencies
+        run: flutter pub get
+
+      - name: Run tests
+        run: flutter test
+
+      - name: Build Windows release
+        run: flutter build windows --release
+
+      # Copy the Release folder into a clean folder named after the tag,
+      # then zip that folder. The zip is the "portable" version users download.
+      - name: Package portable zip
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $staging = "ScreenPen-$tag"
+          New-Item -ItemType Directory -Path "$env:RUNNER_TEMP\$staging" | Out-Null
+          Copy-Item -Path "build\windows\x64\runner\Release\*" -Destination "$env:RUNNER_TEMP\$staging" -Recurse
+          Compress-Archive -Path "$env:RUNNER_TEMP\$staging" -DestinationPath "$env:RUNNER_TEMP\ScreenPen-$tag-portable-win64.zip"
+
+      - name: Create GitHub Release with the portable zip
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ runner.temp }}/ScreenPen-*-portable-win64.zip
+          generate_release_notes: true

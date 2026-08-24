@@ -4,6 +4,18 @@ Screen pen by Hamed Mosaddeghian is a lightweight Flutter annotation overlay ins
 walkthrough in `Sample Materials`. Windows is the first target; the drawing
 model is intentionally portable for later tablet builds.
 
+## Download (portable version)
+
+No installation needed — just download, unzip, and run:
+
+1. Go to the [Releases page](https://github.com/Mosaddeghian/Screen-Pen-by-Hamed-Mosaddeghian/releases/latest).
+2. Download `ScreenPen-vX.Y.Z-portable-win64.zip` from the latest release.
+3. Right-click the zip and choose **Extract All**.
+4. Open the extracted folder and double-click `pen.exe`.
+
+If Windows shows a security warning for an unsigned app, click
+**More info → Run anyway**.
+
 ## Implemented
 
 - Transparent, frameless, always-on-top Windows window.
