@@ -17,7 +17,7 @@ import 'package:window_manager/window_manager.dart';
 const MethodChannel _nativeChannel = MethodChannel('pen/native');
 
 /// Shown in Settings. Keep in sync with `pubspec.yaml` and `CHANGELOG.md`.
-const kAppVersion = '1.2.1';
+const kAppVersion = '1.5.1';
 
 const int _vkShift = 0x10;
 const int _shiftKeyDownBit = 0x8000;
@@ -39,8 +39,7 @@ bool _isShiftLogicalKey(LogicalKeyboardKey key) =>
 /// state instead. Widget tests keep using Flutter's key state.
 bool isShiftHeld() {
   final fromFlutter = HardwareKeyboard.instance.isShiftPressed;
-  if (!Platform.isWindows ||
-      Platform.environment.containsKey('FLUTTER_TEST')) {
+  if (!Platform.isWindows || Platform.environment.containsKey('FLUTTER_TEST')) {
     return fromFlutter;
   }
   return _windowsShiftKeyDown() ?? fromFlutter;
@@ -99,6 +98,84 @@ Offset constrainLineToAxis(Offset start, Offset end) {
       : Offset(start.dx, end.dy);
 }
 
+const Color kCandleBullColor = Color(0xff46d17d);
+const Color kCandleBearColor = Color(0xffff4d67);
+const String kGreenCandleSlotId = 'candle-green';
+const String kRedCandleSlotId = 'candle-red';
+
+/// Drag up (smaller screen Y) is bullish; drag down is bearish.
+bool candleDragIsBullish(Offset start, Offset end) => end.dy < start.dy;
+
+double defaultCandleWickLength(double bodyHeight, double thickness) {
+  final height = bodyHeight.abs();
+  return math.max(thickness, math.max(4, height * 0.15));
+}
+
+/// Body from a drag: vertical span is open/close; width is at least [thickness].
+CandleSpec candleSpecFromBodyDrag(
+  Offset start,
+  Offset end,
+  double thickness, {
+  bool includeDefaultWicks = true,
+}) {
+  final width = math.max(thickness, (end.dx - start.dx).abs());
+  final x = (start.dx + end.dx) / 2 - width / 2;
+  final openY = start.dy;
+  final closeY = end.dy;
+  final bodyTop = math.min(openY, closeY);
+  final bodyBottom = math.max(openY, closeY);
+  final wick = includeDefaultWicks
+      ? defaultCandleWickLength(bodyBottom - bodyTop, thickness)
+      : 0.0;
+  return CandleSpec(
+    x: x,
+    width: width,
+    openY: openY,
+    closeY: closeY,
+    highY: bodyTop - wick,
+    lowY: bodyBottom + wick,
+  );
+}
+
+CandleSpec applyCandleWicks(CandleSpec body, Offset a, Offset b) {
+  final bodyTop = math.min(body.openY, body.closeY);
+  final bodyBottom = math.max(body.openY, body.closeY);
+  return CandleSpec(
+    x: body.x,
+    width: body.width,
+    openY: body.openY,
+    closeY: body.closeY,
+    highY: math.min(bodyTop, math.min(a.dy, b.dy)),
+    lowY: math.max(bodyBottom, math.max(a.dy, b.dy)),
+  );
+}
+
+CandleSpec defaultCandleAt(Offset point, double thickness) {
+  final bodyHeight = math.max(16.0, thickness * 4);
+  final openY = point.dy + bodyHeight / 2;
+  final closeY = point.dy - bodyHeight / 2;
+  return candleSpecFromBodyDrag(
+    Offset(point.dx, openY),
+    Offset(point.dx, closeY),
+    thickness,
+  );
+}
+
+Rect candleGroupBounds(Iterable<CandleSpec> candles) {
+  var left = double.infinity;
+  var top = double.infinity;
+  var right = double.negativeInfinity;
+  var bottom = double.negativeInfinity;
+  for (final candle in candles) {
+    left = math.min(left, candle.x);
+    right = math.max(right, candle.x + candle.width);
+    top = math.min(top, candle.highY);
+    bottom = math.max(bottom, candle.lowY);
+  }
+  if (left.isInfinite) return Rect.zero;
+  return Rect.fromLTRB(left, top, right, bottom);
+}
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await windowManager.ensureInitialized();
@@ -120,7 +197,7 @@ void main() async {
 
 enum CanvasMode { screen, whiteboard, blackboard }
 
-enum ToolType { pen, highlighter, text, line, rectangle }
+enum ToolType { pen, highlighter, text, line, rectangle, candlestick }
 
 enum ToolbarDock { left, right, top, bottom }
 
@@ -197,20 +274,24 @@ extension ToolTypeLabel on ToolType {
     ToolType.text => 'Text',
     ToolType.line => 'Line',
     ToolType.rectangle => 'Rectangle',
+    ToolType.candlestick => 'Candle',
   };
 
-  /// Material glyph for tools that use a stock icon. Highlighter uses a custom
-  /// painter instead — see [_HighlighterIcon].
+  /// Material glyph for tools that use a stock icon. Highlighter and candle
+  /// tools use a custom painter instead — see [_HighlighterIcon] /
+  /// [_CandlestickIcon].
   IconData? get icon => switch (this) {
     ToolType.pen => Icons.edit_outlined,
     ToolType.highlighter => null,
     ToolType.text => Icons.title,
     ToolType.line => Icons.horizontal_rule,
     ToolType.rectangle => Icons.crop_square,
+    ToolType.candlestick => null,
   };
 
   Widget get toolbarIcon => switch (this) {
     ToolType.highlighter => const _HighlighterIcon(),
+    ToolType.candlestick => const _CandlestickIcon(),
     _ => Icon(icon, size: 20),
   };
 }
@@ -245,6 +326,7 @@ class ToolSlot {
     required this.thickness,
     this.filled = false,
     this.fontSize = 24,
+    this.presetText,
   });
 
   final String id;
@@ -253,10 +335,31 @@ class ToolSlot {
   double thickness;
   bool filled;
   double fontSize;
+  String? presetText;
 
   Color get drawingColor => type == ToolType.highlighter
       ? color.withValues(alpha: highlighterOpacity)
       : color.withValues(alpha: 1);
+
+  String? get placedPresetText {
+    final text = presetText?.trim();
+    if (text == null || text.isEmpty) return null;
+    return text;
+  }
+
+  String? get toolbarTitle {
+    if (type == ToolType.candlestick) {
+      if (id == kGreenCandleSlotId) return 'Green Candle';
+      if (id == kRedCandleSlotId) return 'Red Candle';
+    }
+    return placedPresetText ?? type.label;
+  }
+
+  String? get toolbarBadge {
+    if (placedPresetText != null) return placedPresetText![0].toUpperCase();
+    if (type == ToolType.rectangle && filled) return 'F';
+    return null;
+  }
 
   ToolSlot copy() => ToolSlot(
     id: id,
@@ -265,6 +368,7 @@ class ToolSlot {
     thickness: thickness,
     filled: filled,
     fontSize: fontSize,
+    presetText: presetText,
   );
 
   Map<String, dynamic> toJson() => {
@@ -274,6 +378,7 @@ class ToolSlot {
     'thickness': thickness,
     'filled': filled,
     'fontSize': fontSize,
+    'presetText': presetText,
   };
 
   factory ToolSlot.fromJson(Map<String, dynamic> json) {
@@ -282,6 +387,10 @@ class ToolSlot {
       12,
       72,
     );
+    final presetRaw = json['presetText'] as String?;
+    final presetText = presetRaw == null || presetRaw.trim().isEmpty
+        ? null
+        : presetRaw;
     return ToolSlot(
       id: json['id'] as String,
       type: ToolType.values.byName(json['type'] as String),
@@ -289,6 +398,7 @@ class ToolSlot {
       thickness: thickness.toDouble(),
       filled: json['filled'] as bool? ?? false,
       fontSize: fontSize.toDouble(),
+      presetText: presetText,
     );
   }
 }
@@ -364,8 +474,84 @@ class TextDrawable extends Drawable {
   };
 }
 
+class CandleSpec {
+  const CandleSpec({
+    required this.x,
+    required this.width,
+    required this.openY,
+    required this.closeY,
+    required this.highY,
+    required this.lowY,
+  });
+
+  final double x;
+  final double width;
+  final double openY;
+  final double closeY;
+  final double highY;
+  final double lowY;
+
+  bool get isBullish => closeY < openY;
+
+  Map<String, dynamic> toJson() => {
+    'x': x,
+    'width': width,
+    'openY': openY,
+    'closeY': closeY,
+    'highY': highY,
+    'lowY': lowY,
+  };
+
+  factory CandleSpec.fromJson(Map<String, dynamic> json) => CandleSpec(
+    x: (json['x'] as num).toDouble(),
+    width: (json['width'] as num).toDouble(),
+    openY: (json['openY'] as num).toDouble(),
+    closeY: (json['closeY'] as num).toDouble(),
+    highY: (json['highY'] as num).toDouble(),
+    lowY: (json['lowY'] as num).toDouble(),
+  );
+}
+
+class CandleGroupDrawable extends Drawable {
+  const CandleGroupDrawable(
+    this.candles, {
+    required this.strokeWidth,
+    this.bullColor = kCandleBullColor,
+    this.bearColor = kCandleBearColor,
+  });
+
+  final List<CandleSpec> candles;
+  final double strokeWidth;
+  final Color bullColor;
+  final Color bearColor;
+
+  @override
+  Map<String, dynamic> toJson() => {
+    'kind': 'candles',
+    'candles': candles.map((c) => c.toJson()).toList(),
+    'width': strokeWidth,
+    'bullColor': bullColor.toARGB32(),
+    'bearColor': bearColor.toARGB32(),
+  };
+}
+
 Drawable? drawableFromJson(Map<String, dynamic> json) {
   final kind = json['kind'] as String;
+  if (kind == 'candles') {
+    final raw = json['candles'] as List;
+    return CandleGroupDrawable(
+      raw
+          .map((item) => CandleSpec.fromJson(item as Map<String, dynamic>))
+          .toList(),
+      strokeWidth: (json['width'] as num?)?.toDouble() ?? 2,
+      bullColor: json['bullColor'] is int
+          ? Color(json['bullColor'] as int)
+          : kCandleBullColor,
+      bearColor: json['bearColor'] is int
+          ? Color(json['bearColor'] as int)
+          : kCandleBearColor,
+    );
+  }
   final color = Color(json['color'] as int);
   switch (kind) {
     case 'stroke':
@@ -488,6 +674,22 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
       fontSize: 24,
     ),
     ToolSlot(
+      id: 'text-important',
+      type: ToolType.text,
+      color: const Color(0xffff5d73),
+      thickness: 3,
+      fontSize: 28,
+      presetText: 'Important',
+    ),
+    ToolSlot(
+      id: 'text-note',
+      type: ToolType.text,
+      color: const Color(0xff35a7ff),
+      thickness: 3,
+      fontSize: 24,
+      presetText: 'Note',
+    ),
+    ToolSlot(
       id: 'line-a',
       type: ToolType.line,
       color: const Color(0xffffd447),
@@ -498,6 +700,18 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
       type: ToolType.rectangle,
       color: const Color(0xff56d364),
       thickness: 4,
+    ),
+    ToolSlot(
+      id: kGreenCandleSlotId,
+      type: ToolType.candlestick,
+      color: kCandleBullColor,
+      thickness: 8,
+    ),
+    ToolSlot(
+      id: kRedCandleSlotId,
+      type: ToolType.candlestick,
+      color: kCandleBearColor,
+      thickness: 8,
     ),
   ];
 
@@ -529,6 +743,7 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
   bool _shiftPressed = false;
   bool _shuttingDown = false;
   bool _hitTestSyncScheduled = false;
+  CandleGroupDrawable? _pendingCandle;
   int _passThroughOverlayDepth = 0;
   ui.Image? _magnifierImage;
   final _toolbarKey = GlobalKey();
@@ -636,11 +851,17 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
       if (rawSlots != null && rawSlots.isNotEmpty) {
         final decodedSlots = <ToolSlot>[];
         final seenIds = <String>{};
+        var legacyUnsupportedSlotsFound = false;
         for (final value in rawSlots) {
           try {
-            final slot = ToolSlot.fromJson(
-              jsonDecode(value) as Map<String, dynamic>,
-            );
+            final json = jsonDecode(value) as Map<String, dynamic>;
+            final rawType = json['type'];
+            if (rawType is! String ||
+                !ToolType.values.any((type) => type.name == rawType)) {
+              legacyUnsupportedSlotsFound = true;
+              continue;
+            }
+            final slot = ToolSlot.fromJson(json);
             if (slot.id.isNotEmpty && seenIds.add(slot.id)) {
               decodedSlots.add(slot);
             }
@@ -648,7 +869,7 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
             // Keep loading valid tools if one saved entry is corrupt.
           }
         }
-        if (decodedSlots.isNotEmpty) {
+        if (decodedSlots.isNotEmpty || legacyUnsupportedSlotsFound) {
           String availableId(String base) {
             var candidate = base;
             var suffix = 2;
@@ -691,6 +912,125 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
             }
             await prefs.setBool('slots_migrated_v2', true);
             if (slotsMigrationApplied) {
+              await prefs.setStringList(
+                'tool_slots',
+                decodedSlots.map((slot) => jsonEncode(slot.toJson())).toList(),
+              );
+            }
+          }
+
+          final slotsMigratedV3 = prefs.getBool('slots_migrated_v3') ?? false;
+          if (!slotsMigratedV3) {
+            final textIndex = decodedSlots.indexWhere(
+              (slot) => slot.type == ToolType.text,
+            );
+            final highlighterIndex = decodedSlots.indexWhere(
+              (slot) => slot.type == ToolType.highlighter,
+            );
+            final insertAt = textIndex >= 0
+                ? textIndex + 1
+                : highlighterIndex >= 0
+                ? highlighterIndex + 1
+                : decodedSlots.length;
+            decodedSlots.insert(
+              insertAt,
+              ToolSlot(
+                id: availableId('text-important'),
+                type: ToolType.text,
+                color: const Color(0xffff5d73),
+                thickness: 3,
+                fontSize: 28,
+                presetText: 'Important',
+              ),
+            );
+            decodedSlots.insert(
+              insertAt + 1,
+              ToolSlot(
+                id: availableId('text-note'),
+                type: ToolType.text,
+                color: const Color(0xff35a7ff),
+                thickness: 3,
+                fontSize: 24,
+                presetText: 'Note',
+              ),
+            );
+            await prefs.setBool('slots_migrated_v3', true);
+            await prefs.setStringList(
+              'tool_slots',
+              decodedSlots.map((slot) => jsonEncode(slot.toJson())).toList(),
+            );
+          }
+
+          final slotsMigratedV5 = prefs.getBool('slots_migrated_v5') ?? false;
+          if (!slotsMigratedV5 || legacyUnsupportedSlotsFound) {
+            var candleSlotsMigrationApplied = legacyUnsupportedSlotsFound;
+
+            int candleInsertIndex() {
+              final candleIndex = decodedSlots.lastIndexWhere(
+                (slot) => slot.type == ToolType.candlestick,
+              );
+              if (candleIndex >= 0) return candleIndex + 1;
+              final rectIndex = decodedSlots.lastIndexWhere(
+                (slot) => slot.type == ToolType.rectangle,
+              );
+              return rectIndex >= 0 ? rectIndex + 1 : decodedSlots.length;
+            }
+
+            final greenCandleIndex = decodedSlots.indexWhere(
+              (slot) =>
+                  slot.id == kGreenCandleSlotId &&
+                  slot.type == ToolType.candlestick,
+            );
+            if (greenCandleIndex < 0) {
+              final legacyCandleIndex = decodedSlots.indexWhere(
+                (slot) =>
+                    slot.id == 'candle-draw' &&
+                    slot.type == ToolType.candlestick,
+              );
+              if (legacyCandleIndex >= 0) {
+                final legacyCandle = decodedSlots[legacyCandleIndex];
+                decodedSlots[legacyCandleIndex] = ToolSlot(
+                  id: availableId(kGreenCandleSlotId),
+                  type: ToolType.candlestick,
+                  color: legacyCandle.color,
+                  thickness: legacyCandle.thickness,
+                  filled: legacyCandle.filled,
+                  fontSize: legacyCandle.fontSize,
+                  presetText: legacyCandle.presetText,
+                );
+              } else {
+                decodedSlots.insert(
+                  candleInsertIndex(),
+                  ToolSlot(
+                    id: availableId(kGreenCandleSlotId),
+                    type: ToolType.candlestick,
+                    color: kCandleBullColor,
+                    thickness: 8,
+                  ),
+                );
+              }
+              candleSlotsMigrationApplied = true;
+            }
+
+            if (!decodedSlots.any(
+              (slot) =>
+                  slot.id == kRedCandleSlotId &&
+                  slot.type == ToolType.candlestick,
+            )) {
+              decodedSlots.insert(
+                candleInsertIndex(),
+                ToolSlot(
+                  id: availableId(kRedCandleSlotId),
+                  type: ToolType.candlestick,
+                  color: kCandleBearColor,
+                  thickness: 8,
+                ),
+              );
+              candleSlotsMigrationApplied = true;
+            }
+
+            await prefs.setBool('slots_migrated_v5', true);
+            if (candleSlotsMigrationApplied || !slotsMigratedV5) {
               await prefs.setStringList(
                 'tool_slots',
                 decodedSlots.map((slot) => jsonEncode(slot.toJson())).toList(),
@@ -793,6 +1133,15 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
       }
       _screenshotFolder =
           prefs.getString('screenshot_folder') ?? _defaultScreenshotFolder;
+
+      // Defaults already include Important / Note. Mark v3 done if this launch
+      // did not migrate saved slots, so the next launch does not insert again.
+      if (!(prefs.getBool('slots_migrated_v3') ?? false)) {
+        await prefs.setBool('slots_migrated_v3', true);
+      }
+      if (!(prefs.getBool('slots_migrated_v5') ?? false)) {
+        await prefs.setBool('slots_migrated_v5', true);
+      }
     } catch (_) {
       // Invalid preferences must never leave the transparent app unusable.
       _activeSlotId = _slots.first.id;
@@ -904,6 +1253,7 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
 
   Future<void> _setActiveSlot(String? id) async {
     if (_editingText) _commitInlineText();
+    _commitPendingCandle();
     final leavingMagnifier = _isMagnifierSelected && id != '__magnifier__';
     setState(() {
       _activeSlotId = id;
@@ -1229,6 +1579,22 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
     _scheduleHitTestSync();
   }
 
+  void _removeSlot(ToolSlot slot) {
+    if (_slots.length <= 1) return;
+    final wasActive = _activeSlotId == slot.id;
+    setState(() {
+      _slots.removeWhere((item) => item.id == slot.id);
+      if (_toolBeforeCollapse == slot.id) {
+        _toolBeforeCollapse = _slots.first.id;
+      }
+    });
+    if (wasActive) {
+      unawaited(_setActiveSlot(_slots.first.id));
+    } else {
+      _scheduleSave();
+    }
+  }
+
   void _toggleSlot(ToolSlot slot) {
     unawaited(_setActiveSlot(_activeSlotId == slot.id ? null : slot.id));
   }
@@ -1345,7 +1711,19 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
     if (_isEraserSelected) return;
     final slot = _selectedSlot;
     if (slot == null) return;
-    setState(() => slot.color = color.withValues(alpha: 1));
+    final nextColor = color.withValues(alpha: 1);
+    setState(() {
+      slot.color = nextColor;
+      final pending = _pendingCandle;
+      if (slot.type == ToolType.candlestick && pending != null) {
+        _pendingCandle = CandleGroupDrawable(
+          pending.candles,
+          strokeWidth: pending.strokeWidth,
+          bullColor: nextColor,
+          bearColor: nextColor,
+        );
+      }
+    });
     _scheduleSave();
   }
 
@@ -1375,6 +1753,29 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
     _shiftPollTimer = null;
   }
 
+  void _commitPendingCandle() {
+    final pending = _pendingCandle;
+    if (pending == null) return;
+    _pushUndo();
+    _pendingCandle = null;
+    _activeDrawables.add(pending);
+    if (mounted) setState(() {});
+    _scheduleSave();
+  }
+
+  CandleGroupDrawable _candleGroupFromSpecs(
+    List<CandleSpec> candles,
+    double thickness,
+    Color color,
+  ) {
+    return CandleGroupDrawable(
+      candles,
+      strokeWidth: math.max(1, thickness / 4),
+      bullColor: color,
+      bearColor: color,
+    );
+  }
+
   void _startDrawing(DragStartDetails details) {
     if (!_hasDrawingTool) return;
     _keyboardFocus.requestFocus();
@@ -1385,7 +1786,9 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
       _eraseAt(details.localPosition, grouped: true);
       return;
     }
-    if (_activeSlot.type == ToolType.text) return;
+    if (_activeSlot.type == ToolType.text) {
+      return;
+    }
     setState(() {
       _draftStart = details.localPosition;
       _draftEnd = details.localPosition;
@@ -1440,6 +1843,50 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
     final slot = _activeSlot;
     final isFreehand =
         slot.type == ToolType.pen || slot.type == ToolType.highlighter;
+    if (slot.type == ToolType.candlestick) {
+      final pending = _pendingCandle;
+      if (pending != null && pending.candles.isNotEmpty) {
+        final body = pending.candles.first;
+        final moved = (end - start).distance >= 2;
+        final finished = moved ? applyCandleWicks(body, start, end) : body;
+        _pushUndo();
+        _activeDrawables.add(
+          CandleGroupDrawable(
+            [finished],
+            strokeWidth: pending.strokeWidth,
+            bullColor: slot.color,
+            bearColor: slot.color,
+          ),
+        );
+        setState(() {
+          _pendingCandle = null;
+          _draftStart = null;
+          _draftEnd = null;
+          _draftPoints = <Offset>[];
+        });
+        _scheduleSave();
+        return;
+      }
+      if ((end - start).distance < 2) {
+        setState(() {
+          _draftStart = null;
+          _draftEnd = null;
+          _draftPoints = <Offset>[];
+        });
+        return;
+      }
+      setState(() {
+        _pendingCandle = _candleGroupFromSpecs(
+          [candleSpecFromBodyDrag(start, end, slot.thickness)],
+          slot.thickness,
+          slot.color,
+        );
+        _draftStart = null;
+        _draftEnd = null;
+        _draftPoints = <Offset>[];
+      });
+      return;
+    }
     if ((end - start).distance < 2 && !isFreehand) {
       setState(() {
         _draftStart = null;
@@ -1472,7 +1919,7 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
         slot.thickness,
         slot.filled,
       ),
-      ToolType.text => null,
+      ToolType.text || ToolType.candlestick => null,
     };
     if (drawable != null) _activeDrawables.add(drawable);
     setState(() {
@@ -1497,7 +1944,40 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
     if (_isEraserSelected) {
       _eraseAt(details.localPosition);
     } else if (_activeSlot.type == ToolType.text) {
-      _beginInlineText(details.localPosition);
+      final preset = _activeSlot.placedPresetText;
+      if (preset != null) {
+        if (_editingText) _commitInlineText();
+        _pushUndo();
+        setState(
+          () => _activeDrawables.add(
+            TextDrawable(
+              details.localPosition,
+              preset,
+              _activeSlot.drawingColor,
+              _activeSlot.fontSize,
+            ),
+          ),
+        );
+        _scheduleSave();
+      } else {
+        _beginInlineText(details.localPosition);
+      }
+    } else if (_activeSlot.type == ToolType.candlestick) {
+      if (_pendingCandle != null) {
+        _commitPendingCandle();
+      } else {
+        _pushUndo();
+        setState(
+          () => _activeDrawables.add(
+            _candleGroupFromSpecs(
+              [defaultCandleAt(details.localPosition, _activeSlot.thickness)],
+              _activeSlot.thickness,
+              _activeSlot.color,
+            ),
+          ),
+        );
+        _scheduleSave();
+      }
     } else if (_activeSlot.type == ToolType.pen ||
         _activeSlot.type == ToolType.highlighter) {
       _pushUndo();
@@ -1598,6 +2078,10 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
           item.fontSize * 1.2,
         );
         return rect.inflate(tolerance).contains(point);
+      case CandleGroupDrawable():
+        return candleGroupBounds(
+          item.candles,
+        ).inflate(tolerance + item.strokeWidth).contains(point);
     }
     return false;
   }
@@ -1760,15 +2244,17 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
         thickness: result.thickness,
         filled: result.filled,
         fontSize: result.fontSize,
+        presetText: result.presetText,
       );
       setState(() {
         _slots.add(newSlot);
       });
       unawaited(_setActiveSlot(newSlot.id));
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('${result.type.label} slot $suffix added')),
-        );
+        final label = result.toolbarTitle ?? result.type.label;
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('$label slot $suffix added')));
       }
     } finally {
       await _resumePassThroughAfterOverlay();
@@ -1879,29 +2365,47 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
                                 ),
                                 child: slot.type.toolbarIcon,
                               ),
-                        title: Text(slot.type.label),
+                        title: Text(slot.toolbarTitle ?? slot.type.label),
                         subtitle: Text(switch (slot.type) {
                           ToolType.text =>
                             '${slot.fontSize.toStringAsFixed(0)} px text',
                           ToolType.rectangle =>
                             '${slot.thickness.toStringAsFixed(0)} px  •  '
                                 '${slot.filled ? 'Filled' : 'Outline'}',
+                          ToolType.candlestick =>
+                            '${slot.thickness.toStringAsFixed(0)} px candle',
                           _ => '${slot.thickness.toStringAsFixed(0)} px',
                         }),
-                        trailing: IconButton(
-                          tooltip: 'Select slot',
-                          onPressed: () {
-                            _selectSlot(slot);
-                            setDialogState(() {});
-                          },
-                          icon: Icon(
-                            _activeSlotId == slot.id
-                                ? Icons.radio_button_checked
-                                : Icons.radio_button_off,
-                            color: _activeSlotId == slot.id
-                                ? Theme.of(context).colorScheme.primary
-                                : null,
-                          ),
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              key: ValueKey('remove-tool-${slot.id}'),
+                              tooltip: 'Remove tool',
+                              onPressed: _slots.length <= 1
+                                  ? null
+                                  : () {
+                                      _removeSlot(slot);
+                                      setDialogState(() {});
+                                    },
+                              icon: const Icon(Icons.delete_outline),
+                            ),
+                            IconButton(
+                              tooltip: 'Select slot',
+                              onPressed: () {
+                                _selectSlot(slot);
+                                setDialogState(() {});
+                              },
+                              icon: Icon(
+                                _activeSlotId == slot.id
+                                    ? Icons.radio_button_checked
+                                    : Icons.radio_button_off,
+                                color: _activeSlotId == slot.id
+                                    ? Theme.of(context).colorScheme.primary
+                                    : null,
+                              ),
+                            ),
+                          ],
                         ),
                       ),
                     ),
@@ -1951,6 +2455,11 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
           event.logicalKey == LogicalKeyboardKey.escape) {
         _cancelInlineText();
       }
+      return;
+    }
+    if (event is KeyDownEvent &&
+        event.logicalKey == LogicalKeyboardKey.escape) {
+      _commitPendingCandle();
       return;
     }
     if (event is! KeyDownEvent) return;
@@ -2031,6 +2540,7 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
                   ToolType.text => ToolCursorKind.text,
                   ToolType.line => ToolCursorKind.line,
                   ToolType.rectangle => ToolCursorKind.rectangle,
+                  ToolType.candlestick => ToolCursorKind.candlestick,
                 })
         : null;
     // Explicit Pointer tool keeps the presentation ring. Idle desktop (right-
@@ -2061,7 +2571,9 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
                   child: ColoredBox(
                     color: boardColor,
                     child: MouseRegion(
-                      cursor: annotationActive || _isMagnifierSelected
+                      // Normal arrow stays visible; the tool icon is painted
+                      // beside it so the arrow tip shows the exact draw point.
+                      cursor: _isMagnifierSelected
                           ? SystemMouseCursors.none
                           : SystemMouseCursors.basic,
                       onHover: (event) {
@@ -2101,6 +2613,7 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
                                       !_isMagnifierSelected
                                   ? _activeSlot
                                   : _slots.first,
+                              pendingCandle: _pendingCandle,
                               pointerPosition: _pointerPosition,
                               showPointer: showPointerRing,
                               toolCursorKind: toolCursorKind,
@@ -2238,7 +2751,15 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
   }
 }
 
-enum ToolCursorKind { pen, highlighter, eraser, line, rectangle, text }
+enum ToolCursorKind {
+  pen,
+  highlighter,
+  eraser,
+  line,
+  rectangle,
+  text,
+  candlestick,
+}
 
 class AnnotationPainter extends CustomPainter {
   const AnnotationPainter({
@@ -2247,6 +2768,7 @@ class AnnotationPainter extends CustomPainter {
     required this.draftStart,
     required this.draftEnd,
     required this.draftSlot,
+    this.pendingCandle,
     required this.pointerPosition,
     required this.showPointer,
     this.toolCursorKind,
@@ -2261,6 +2783,7 @@ class AnnotationPainter extends CustomPainter {
   final Offset? draftStart;
   final Offset? draftEnd;
   final ToolSlot draftSlot;
+  final CandleGroupDrawable? pendingCandle;
   final Offset? pointerPosition;
   final bool showPointer;
   final ToolCursorKind? toolCursorKind;
@@ -2273,6 +2796,9 @@ class AnnotationPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     for (final item in drawables) {
       _paintDrawable(canvas, item);
+    }
+    if (pendingCandle != null) {
+      _paintDrawable(canvas, pendingCandle!);
     }
     if (draftStart != null && draftEnd != null) {
       switch (draftSlot.type) {
@@ -2316,7 +2842,44 @@ class AnnotationPainter extends CustomPainter {
           );
         case ToolType.text:
           break;
+        case ToolType.candlestick:
+          final pending = pendingCandle;
+          if (pending != null && pending.candles.isNotEmpty) {
+            _paintDrawable(
+              canvas,
+              CandleGroupDrawable(
+                [
+                  applyCandleWicks(
+                    pending.candles.first,
+                    draftStart!,
+                    draftEnd!,
+                  ),
+                ],
+                strokeWidth: pending.strokeWidth,
+                bullColor: draftSlot.color,
+                bearColor: draftSlot.color,
+              ),
+            );
+          } else {
+            _paintDrawable(
+              canvas,
+              CandleGroupDrawable(
+                [
+                  candleSpecFromBodyDrag(
+                    draftStart!,
+                    draftEnd!,
+                    draftSlot.thickness,
+                  ),
+                ],
+                strokeWidth: math.max(1, draftSlot.thickness / 4),
+                bullColor: draftSlot.color,
+                bearColor: draftSlot.color,
+              ),
+            );
+          }
       }
+    } else if (pendingCandle != null) {
+      _paintDrawable(canvas, pendingCandle!);
     }
     if (showPointer && pointerPosition != null) {
       final halo = Paint()
@@ -2378,13 +2941,16 @@ class AnnotationPainter extends CustomPainter {
     Color? color,
   ) {
     final ink = color ?? const Color(0xff35a7ff);
+    // The normal OS arrow is visible with its tip at [position], so each
+    // preview sits beside the arrow instead of under it. The arrow tip
+    // itself marks the exact draw point.
     switch (kind) {
       case ToolCursorKind.pen:
         final path = Path()
-          ..moveTo(position.dx + 2, position.dy + 14)
-          ..lineTo(position.dx + 10, position.dy + 6)
-          ..lineTo(position.dx + 14, position.dy + 10)
-          ..lineTo(position.dx + 6, position.dy + 18)
+          ..moveTo(position.dx + 14, position.dy + 22)
+          ..lineTo(position.dx + 22, position.dy + 14)
+          ..lineTo(position.dx + 26, position.dy + 18)
+          ..lineTo(position.dx + 18, position.dy + 26)
           ..close();
         canvas.drawPath(path, Paint()..color = ink);
         canvas.drawCircle(position, 1.8, Paint()..color = ink);
@@ -2392,7 +2958,7 @@ class AnnotationPainter extends CustomPainter {
         canvas.drawRRect(
           RRect.fromRectAndRadius(
             Rect.fromCenter(
-              center: position.translate(8, 8),
+              center: position.translate(20, 18),
               width: 14,
               height: 8,
             ),
@@ -2405,7 +2971,7 @@ class AnnotationPainter extends CustomPainter {
         canvas.drawRRect(
           RRect.fromRectAndRadius(
             Rect.fromCenter(
-              center: position.translate(7, 7),
+              center: position.translate(19, 18),
               width: 14,
               height: 10,
             ),
@@ -2442,7 +3008,21 @@ class AnnotationPainter extends CustomPainter {
           ),
           textDirection: TextDirection.ltr,
         )..layout();
-        painter.paint(canvas, position.translate(-2, -10));
+        painter.paint(canvas, position.translate(14, -12));
+      case ToolCursorKind.candlestick:
+        final body = Rect.fromCenter(
+          center: position.translate(20, 18),
+          width: 7,
+          height: 10,
+        );
+        canvas.drawLine(
+          Offset(body.center.dx, body.top - 5),
+          Offset(body.center.dx, body.bottom + 5),
+          Paint()
+            ..color = ink
+            ..strokeWidth = 1.4,
+        );
+        canvas.drawRect(body, Paint()..color = ink);
     }
   }
 
@@ -2495,7 +3075,41 @@ class AnnotationPainter extends CustomPainter {
           textDirection: TextDirection.ltr,
         )..layout();
         painter.paint(canvas, item.position);
+      case CandleGroupDrawable():
+        for (final candle in item.candles) {
+          _paintCandleSpec(
+            canvas,
+            candle,
+            item.strokeWidth,
+            item.bullColor,
+            item.bearColor,
+          );
+        }
     }
+  }
+
+  void _paintCandleSpec(
+    Canvas canvas,
+    CandleSpec candle,
+    double strokeWidth,
+    Color bullColor,
+    Color bearColor,
+  ) {
+    final color = candle.closeY == candle.openY
+        ? bullColor
+        : (candle.isBullish ? bullColor : bearColor);
+    final bodyTop = math.min(candle.openY, candle.closeY);
+    final bodyBottom = math.max(candle.openY, candle.closeY);
+    final bodyHeight = math.max(1.0, bodyBottom - bodyTop);
+    final body = Rect.fromLTWH(candle.x, bodyTop, candle.width, bodyHeight);
+    final midX = candle.x + candle.width / 2;
+    final wick = Paint()
+      ..color = color
+      ..strokeWidth = math.max(1.0, strokeWidth)
+      ..strokeCap = StrokeCap.round;
+    canvas.drawLine(Offset(midX, candle.highY), Offset(midX, bodyTop), wick);
+    canvas.drawLine(Offset(midX, bodyBottom), Offset(midX, candle.lowY), wick);
+    canvas.drawRect(body, Paint()..color = color);
   }
 
   @override
@@ -2634,14 +3248,27 @@ class _Sidebar extends StatelessWidget {
           child: _ToolIcon(
             buttonKey: ValueKey('tool-${slot.id}'),
             icon: slot.type.icon,
-            iconWidget: slot.type.icon == null ? slot.type.toolbarIcon : null,
-            label: slot.type == ToolType.line
+            iconWidget: slot.type.icon == null
+                ? ColorFiltered(
+                    colorFilter: ColorFilter.mode(
+                      slot.color,
+                      BlendMode.srcATop,
+                    ),
+                    child: slot.type.toolbarIcon,
+                  )
+                : null,
+            label: slot.placedPresetText != null
+                ? '${slot.placedPresetText} (click board to place)'
+                : slot.type == ToolType.line
                 ? 'Line (toggle • hold Shift for horizontal/vertical)'
+                : slot.type == ToolType.candlestick
+                ? '${slot.toolbarTitle ?? slot.type.label} '
+                      '(drag body, then wicks)'
                 : '${slot.type.label} (toggle)',
             selected: slot.id == activeSlotId,
             color: slot.color,
             onPressed: () => onSlot(slot),
-            badge: slot.type == ToolType.rectangle && slot.filled ? 'F' : null,
+            badge: slot.toolbarBadge,
           ),
         ),
       if (selectedSlot != null)
@@ -2980,6 +3607,42 @@ class _HighlighterIconPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _HighlighterIconPainter oldDelegate) => false;
+}
+
+class _CandlestickIcon extends StatelessWidget {
+  const _CandlestickIcon();
+
+  @override
+  Widget build(BuildContext context) =>
+      const CustomPaint(size: Size(22, 22), painter: _CandlestickIconPainter());
+}
+
+class _CandlestickIconPainter extends CustomPainter {
+  const _CandlestickIconPainter();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final midX = size.width / 2;
+    final body = Rect.fromCenter(
+      center: Offset(midX, size.height / 2),
+      width: 7,
+      height: 10,
+    );
+    final wick = Paint()
+      ..color = const Color(0xff46d17d)
+      ..strokeWidth = 1.4
+      ..strokeCap = StrokeCap.round;
+    canvas.drawLine(Offset(midX, 2), Offset(midX, body.top), wick);
+    canvas.drawLine(
+      Offset(midX, body.bottom),
+      Offset(midX, size.height - 2),
+      wick,
+    );
+    canvas.drawRect(body, Paint()..color = const Color(0xff46d17d));
+  }
+
+  @override
+  bool shouldRepaint(covariant _CandlestickIconPainter oldDelegate) => false;
 }
 
 class _MagnifierIcon extends StatelessWidget {
@@ -3690,6 +4353,9 @@ class _AddSlotDialogState extends State<_AddSlotDialog> {
         _color = const Color(0xffffd447);
       } else if (type == ToolType.text) {
         _fontSize = 24;
+      } else if (type == ToolType.candlestick) {
+        _thickness = 8;
+        _color = const Color(0xff46d17d);
       } else {
         _thickness = 4;
       }

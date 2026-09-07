@@ -1,5 +1,26 @@
 ﻿# Changelog
 
+## [1.5.1] - 2026-09-07
+### Changed
+- Keep the normal arrow pointer visible and show the selected tool icon beside it so the arrow tip marks the exact draw point.
+
+## [1.5.0] - 2026-09-06
+### Added
+- Add separate green and red candlestick drawing slots with selectable colors.
+### Removed
+- Remove the Doji, Hammer, Engulfing, and Star candlestick pattern tools.
+
+## [1.4.0] - 2026-09-06
+### Added
+- Add a candlestick tool that draws bullish or bearish candles with optional wicks.
+- Add Doji, Hammer, Engulfing, and Star candlestick pattern tools.
+- Persist candlestick tools and migrate saved tool slots once.
+
+## [1.3.0] - 2026-09-06
+### Added
+- Remove extra tool slots from Settings while keeping the final tool protected.
+- Add one-click Important and Note text tools that place their word on the board.
+
 ## [1.2.1] - 2026-08-13
 ### Fixed
 - Drawings now appear in Google Meet screen share and screen recordings (overlay no longer excluded from capture).

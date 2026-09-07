@@ -12,6 +12,89 @@ void main() {
     SharedPreferences.setMockInitialValues({});
   });
 
+  group('candlestick tools', () {
+    test('should classify bullish and bearish body drags', () {
+      expect(
+        candleDragIsBullish(const Offset(80, 220), const Offset(140, 160)),
+        isTrue,
+      );
+      expect(
+        candleDragIsBullish(const Offset(80, 160), const Offset(140, 220)),
+        isFalse,
+      );
+
+      final bullish = candleSpecFromBodyDrag(
+        const Offset(80, 220),
+        const Offset(140, 160),
+        8,
+      );
+      final bearish = candleSpecFromBodyDrag(
+        const Offset(80, 160),
+        const Offset(140, 220),
+        8,
+      );
+      expect(bullish.isBullish, isTrue);
+      expect(bearish.isBullish, isFalse);
+    });
+
+    test('should round-trip a candle group through JSON', () {
+      const source = CandleGroupDrawable(
+        [
+          CandleSpec(
+            x: 24,
+            width: 8,
+            openY: 180,
+            closeY: 140,
+            highY: 120,
+            lowY: 200,
+          ),
+          CandleSpec(
+            x: 40,
+            width: 8,
+            openY: 150,
+            closeY: 190,
+            highY: 130,
+            lowY: 210,
+          ),
+        ],
+        strokeWidth: 2.5,
+        bullColor: Color(0xff123456),
+        bearColor: Color(0xff654321),
+      );
+
+      final restored = drawableFromJson(source.toJson());
+
+      expect(restored, isA<CandleGroupDrawable>());
+      expect(jsonEncode(restored!.toJson()), jsonEncode(source.toJson()));
+    });
+
+    test('regular candle slots round-trip through JSON', () {
+      final sources = [
+        ToolSlot(
+          id: kGreenCandleSlotId,
+          type: ToolType.candlestick,
+          color: kCandleBullColor,
+          thickness: 8,
+        ),
+        ToolSlot(
+          id: kRedCandleSlotId,
+          type: ToolType.candlestick,
+          color: kCandleBearColor,
+          thickness: 8,
+        ),
+      ];
+
+      for (final source in sources) {
+        final restored = ToolSlot.fromJson(source.toJson());
+
+        expect(restored.id, source.id);
+        expect(restored.type, ToolType.candlestick);
+        expect(restored.color, source.color);
+        expect(jsonEncode(restored.toJson()), jsonEncode(source.toJson()));
+      }
+    });
+  });
+
   test('highlighter keeps an opaque selection color and translucent ink', () {
     final slot = ToolSlot(
       id: 'highlighter-test',
@@ -31,6 +114,22 @@ void main() {
     expect(restored.type, ToolType.highlighter);
     expect(restored.thickness, 20);
     expect(restored.drawingColor.a, closeTo(highlighterOpacity, .001));
+  });
+
+  test('preset text round-trips through JSON', () {
+    final slot = ToolSlot(
+      id: 'text-important',
+      type: ToolType.text,
+      color: const Color(0xffff5d73),
+      thickness: 3,
+      fontSize: 28,
+      presetText: 'Important',
+    );
+
+    final restored = ToolSlot.fromJson(slot.toJson());
+
+    expect(restored.presetText, 'Important');
+    expect(restored.placedPresetText, 'Important');
   });
 
   test('toolbar thickness constant sits between the prior extremes', () {
@@ -80,7 +179,9 @@ void main() {
     expect(bounds.height, 1080);
   });
 
-  testWidgets('empty prefs yield one pen and one highlighter', (tester) async {
+  testWidgets('empty prefs yield default tools including candle tools', (
+    tester,
+  ) async {
     SharedPreferences.setMockInitialValues({});
 
     await tester.pumpWidget(const PenApp());
@@ -88,6 +189,21 @@ void main() {
 
     expect(find.byTooltip('Pen (toggle)'), findsOneWidget);
     expect(find.byTooltip('Highlighter (toggle)'), findsOneWidget);
+    expect(find.byKey(const ValueKey('tool-text-important')), findsOneWidget);
+    expect(find.byKey(const ValueKey('tool-text-note')), findsOneWidget);
+    expect(find.byKey(const ValueKey('tool-candle-green')), findsOneWidget);
+    expect(find.byKey(const ValueKey('tool-candle-red')), findsOneWidget);
+    for (final obsoleteId in const [
+      'candle-draw',
+      'candle-doji',
+      'candle-hammer',
+      'candle-bull-engulf',
+      'candle-bear-engulf',
+      'candle-morning-star',
+      'candle-evening-star',
+    ]) {
+      expect(find.byKey(ValueKey('tool-$obsoleteId')), findsNothing);
+    }
   });
 
   testWidgets('migrates legacy two-pen tool_slots to pen plus highlighter', (
@@ -127,7 +243,10 @@ void main() {
     expect(find.byTooltip('Highlighter (toggle)'), findsOneWidget);
     expect(find.byTooltip('Pointer / desktop (Ctrl+Shift+P)'), findsOneWidget);
     expect(find.byTooltip('Magnifier'), findsOneWidget);
-    expect(find.byTooltip('Exit Screen pen by Hamed Mosaddeghian (Ctrl+Shift+Q)'), findsOneWidget);
+    expect(
+      find.byTooltip('Exit Screen pen by Hamed Mosaddeghian (Ctrl+Shift+Q)'),
+      findsOneWidget,
+    );
   });
 
   testWidgets('pointer tool button shows the presentation ring', (
@@ -163,7 +282,13 @@ void main() {
     expect(find.byKey(const ValueKey('magnifier-size-medium')), findsOneWidget);
     expect(find.byKey(const ValueKey('magnifier-size-large')), findsOneWidget);
 
+    await tester.ensureVisible(find.byKey(const ValueKey('magnifier-zoom-x4')));
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('magnifier-zoom-x4')));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('magnifier-size-large')),
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('magnifier-size-large')));
     await tester.pumpAndSettle();
@@ -257,7 +382,9 @@ void main() {
     expect(line.start.dx, isNot(line.end.dx));
   });
 
-  testWidgets('settings shows the Screen pen by Hamed Mosaddeghian version', (tester) async {
+  testWidgets('settings shows the Screen pen by Hamed Mosaddeghian version', (
+    tester,
+  ) async {
     await tester.binding.setSurfaceSize(const Size(1280, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     await tester.pumpWidget(const PenApp());
@@ -463,7 +590,10 @@ void main() {
     await tester.pumpAndSettle();
 
     final prefs = await SharedPreferences.getInstance();
-    expect(prefs.getString('screenshot_folder'), r'D:\Custom\Screen pen by Hamed MosaddeghianShots');
+    expect(
+      prefs.getString('screenshot_folder'),
+      r'D:\Custom\Screen pen by Hamed MosaddeghianShots',
+    );
   });
 
   testWidgets('minimize restores prior tool without drawing while collapsed', (
@@ -527,6 +657,308 @@ void main() {
 
     final text = _annotationPainter(tester).drawables.single as TextDrawable;
     expect(text.text, 'Hello board');
+  });
+
+  testWidgets('Important places text without opening the inline field', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(const PenApp());
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('tool-text-important')));
+    await tester.pumpAndSettle();
+    await tester.tapAt(const Offset(420, 240));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('inline-text-field')), findsNothing);
+    final text = _annotationPainter(tester).drawables.single as TextDrawable;
+    expect(text.text, 'Important');
+  });
+
+  testWidgets('green candle click places one colored candle group', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(const PenApp());
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('tool-candle-green')));
+    await tester.pumpAndSettle();
+    await tester.tapAt(const Offset(420, 240));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('inline-text-field')), findsNothing);
+    final drawables = _annotationPainter(tester).drawables;
+    expect(drawables, hasLength(1));
+    expect(drawables.single, isA<CandleGroupDrawable>());
+    final candle = drawables.single as CandleGroupDrawable;
+    expect(candle.candles, hasLength(1));
+    expect(candle.bullColor, kCandleBullColor);
+    expect(candle.bearColor, kCandleBullColor);
+  });
+
+  testWidgets('changing a candle color affects the next drawable', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(const PenApp());
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('tool-candle-green')));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.byTooltip('Colors'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Colors'));
+    await tester.pumpAndSettle();
+
+    const selectedColor = Color(0xff35a7ff);
+    await tester.tap(find.byTooltip('#35A7FF'));
+    await tester.pumpAndSettle();
+    await tester.tapAt(const Offset(420, 240));
+    await tester.pumpAndSettle();
+
+    final candle =
+        _annotationPainter(tester).drawables.single as CandleGroupDrawable;
+    expect(candle.bullColor, selectedColor);
+    expect(candle.bearColor, selectedColor);
+  });
+
+  testWidgets('settings removes a duplicate tool and protects the last one', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    final pen = ToolSlot(
+      id: 'pen-a',
+      type: ToolType.pen,
+      color: const Color(0xff35a7ff),
+      thickness: 4,
+    );
+    final highlighter = ToolSlot(
+      id: 'highlighter-a',
+      type: ToolType.highlighter,
+      color: const Color(0xffffd447),
+      thickness: 20,
+    );
+    final rectangleA = ToolSlot(
+      id: 'rect-a',
+      type: ToolType.rectangle,
+      color: const Color(0xff56d364),
+      thickness: 4,
+    );
+    final rectangleB = ToolSlot(
+      id: 'rect-b',
+      type: ToolType.rectangle,
+      color: const Color(0xffff5d73),
+      thickness: 4,
+    );
+    SharedPreferences.setMockInitialValues({
+      'tool_slots': [
+        jsonEncode(pen.toJson()),
+        jsonEncode(highlighter.toJson()),
+        jsonEncode(rectangleA.toJson()),
+        jsonEncode(rectangleB.toJson()),
+      ],
+      'active_slot': 'rect-a',
+      'slots_migrated_v2': true,
+      'slots_migrated_v3': true,
+      'slots_migrated_v4': true,
+      'slots_migrated_v5': true,
+    });
+
+    await tester.pumpWidget(const PenApp());
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.byKey(const ValueKey('settings-button')));
+    await tester.tap(find.byKey(const ValueKey('settings-button')));
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('remove-tool-rect-b')),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('remove-tool-rect-b')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('remove-tool-rect-b')), findsNothing);
+
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('remove-tool-rect-a')),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('remove-tool-rect-a')));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('remove-tool-highlighter-a')),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('remove-tool-highlighter-a')));
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(find.byKey(const ValueKey('remove-tool-pen-a')));
+    final lastRemove = tester.widget<IconButton>(
+      find.byKey(const ValueKey('remove-tool-pen-a')),
+    );
+    expect(lastRemove.onPressed, isNull);
+  });
+
+  testWidgets(
+    'migrates legacy candle slots and removes unsupported patterns once',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1280, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final pen = ToolSlot(
+        id: 'pen-a',
+        type: ToolType.pen,
+        color: const Color(0xff35a7ff),
+        thickness: 4,
+      );
+      final highlighter = ToolSlot(
+        id: 'highlighter-a',
+        type: ToolType.highlighter,
+        color: const Color(0xffffd447),
+        thickness: 20,
+      );
+      final legacyCandle = ToolSlot(
+        id: 'candle-draw',
+        type: ToolType.candlestick,
+        color: const Color(0xff123456),
+        thickness: 10,
+      );
+      final legacyPatternSlots = [
+        {
+          'id': 'candle-doji',
+          'type': 'candlePattern',
+          'color': 0xffff4d67,
+          'thickness': 8,
+        },
+        {
+          'id': 'candle-evening-star',
+          'type': 'candlePattern',
+          'color': 0xff35a7ff,
+          'thickness': 8,
+        },
+      ];
+      const candleToolIds = ['candle-green', 'candle-red'];
+      const obsoleteToolIds = [
+        'candle-draw',
+        'candle-doji',
+        'candle-evening-star',
+      ];
+      SharedPreferences.setMockInitialValues({
+        'tool_slots': [
+          jsonEncode(pen.toJson()),
+          jsonEncode(highlighter.toJson()),
+          jsonEncode(legacyCandle.toJson()),
+          ...legacyPatternSlots.map(jsonEncode),
+        ],
+        'slots_migrated_v2': true,
+        'slots_migrated_v3': true,
+      });
+
+      await tester.pumpWidget(const PenApp());
+      await tester.pumpAndSettle();
+
+      for (final id in candleToolIds) {
+        expect(find.byKey(ValueKey('tool-$id')), findsOneWidget);
+      }
+      for (final id in obsoleteToolIds) {
+        expect(find.byKey(ValueKey('tool-$id')), findsNothing);
+      }
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool('slots_migrated_v5'), isTrue);
+
+      List<Map<String, dynamic>> savedSlots() {
+        final savedSlots = prefs.getStringList('tool_slots') ?? <String>[];
+        return savedSlots
+            .map((value) => jsonDecode(value) as Map<String, dynamic>)
+            .toList();
+      }
+
+      int countSavedSlot(String id) {
+        return savedSlots().where((slot) => slot['id'] == id).length;
+      }
+
+      for (final id in candleToolIds) {
+        expect(countSavedSlot(id), 1);
+      }
+      for (final id in obsoleteToolIds) {
+        expect(countSavedSlot(id), 0);
+      }
+      final migratedGreen = savedSlots().singleWhere(
+        (slot) => slot['id'] == 'candle-green',
+      );
+      expect(migratedGreen['color'], legacyCandle.color.toARGB32());
+
+      await tester.pumpWidget(const PenApp());
+      await tester.pumpAndSettle();
+
+      for (final id in candleToolIds) {
+        expect(find.byKey(ValueKey('tool-$id')), findsOneWidget);
+        expect(countSavedSlot(id), 1);
+      }
+      for (final id in obsoleteToolIds) {
+        expect(find.byKey(ValueKey('tool-$id')), findsNothing);
+        expect(countSavedSlot(id), 0);
+      }
+    },
+  );
+
+  testWidgets('saved slots receive Important and Note only once', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    final pen = ToolSlot(
+      id: 'pen-a',
+      type: ToolType.pen,
+      color: const Color(0xff35a7ff),
+      thickness: 4,
+    );
+    final highlighter = ToolSlot(
+      id: 'highlighter-a',
+      type: ToolType.highlighter,
+      color: const Color(0xffffd447),
+      thickness: 20,
+    );
+    SharedPreferences.setMockInitialValues({
+      'tool_slots': [
+        jsonEncode(pen.toJson()),
+        jsonEncode(highlighter.toJson()),
+      ],
+      'slots_migrated_v2': true,
+    });
+
+    await tester.pumpWidget(const PenApp());
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('tool-text-important')), findsOneWidget);
+    expect(find.byKey(const ValueKey('tool-text-note')), findsOneWidget);
+
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getBool('slots_migrated_v3'), isTrue);
+
+    int countSavedSlot(String id) {
+      final savedSlots = prefs.getStringList('tool_slots') ?? <String>[];
+      return savedSlots
+          .map((value) => jsonDecode(value) as Map<String, dynamic>)
+          .where((slot) => slot['id'] == id)
+          .length;
+    }
+
+    expect(countSavedSlot('text-important'), 1);
+    expect(countSavedSlot('text-note'), 1);
+
+    await tester.pumpWidget(const PenApp());
+    await tester.pumpAndSettle();
+
+    expect(countSavedSlot('text-important'), 1);
+    expect(countSavedSlot('text-note'), 1);
   });
 
   test('pen icon stays on the classic edit glyph', () {

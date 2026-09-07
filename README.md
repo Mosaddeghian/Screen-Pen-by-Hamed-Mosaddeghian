@@ -29,6 +29,10 @@ If Windows shows a security warning for an unsigned app, click
   high-visibility pointer halo.
 - Click-through pointer mode for normal Windows interaction; use
   `Ctrl+Shift+P` to return to annotation mode.
+- Remove extra tools from Settings, and place ready-made Important or Note text
+  with one click.
+- Draw candlesticks with green/red defaults, wicks, and selectable colors for
+  each candle slot.
 - Compact collapsible sidebar, selected-width controls, quick colors, full RGB
   palette, visible Exit action, and settings for taskbar coverage, persistence,
   and screenshot folder.
