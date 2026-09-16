@@ -11,4 +11,7 @@
   `build\windows\x64\runner\Release` into
   `dist/ScreenPen-v<version>-portable-win64.zip` (same steps as
   `.github/workflows/release.yml`). Replace the outdated zip in `dist/`.
+- Hamed wants the portable zip rebuilt right away with every change. If
+  `pen.exe` is locked because the app is still open, ask once with clickable
+  options; on approval close it and rebuild.
 - Current work should keep the project version and changelog synchronized.
