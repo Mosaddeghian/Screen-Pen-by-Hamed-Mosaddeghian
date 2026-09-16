@@ -17,7 +17,7 @@ import 'package:window_manager/window_manager.dart';
 const MethodChannel _nativeChannel = MethodChannel('pen/native');
 
 /// Shown in Settings. Keep in sync with `pubspec.yaml` and `CHANGELOG.md`.
-const kAppVersion = '1.7.0';
+const kAppVersion = '1.7.1';
 
 const int _vkShift = 0x10;
 const int _shiftKeyDownBit = 0x8000;
@@ -939,6 +939,7 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
   ui.Image? _magnifierImage;
   final _toolbarKey = GlobalKey();
   final _restoreKey = GlobalKey();
+  final _slideBarKey = GlobalKey();
   final _textController = TextEditingController();
   final _textFocus = FocusNode();
   Timer? _pointerTimer;
@@ -1704,6 +1705,20 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
     });
   }
 
+  Map<String, int>? _hitTestRectForKey(GlobalKey key, double dpr) {
+    final box = key.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return null;
+    if (box.size.width <= 0 || box.size.height <= 0) return null;
+    final origin = box.localToGlobal(Offset.zero);
+    final size = box.size;
+    return <String, int>{
+      'left': (origin.dx * dpr).round(),
+      'top': (origin.dy * dpr).round(),
+      'right': ((origin.dx + size.width) * dpr).round(),
+      'bottom': ((origin.dy + size.height) * dpr).round(),
+    };
+  }
+
   Future<void> _syncHitTestRects() async {
     if (!Platform.isWindows || _shuttingDown || !mounted) return;
     if (!_wantPassThrough) {
@@ -1714,21 +1729,23 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
       } catch (_) {}
       return;
     }
-    final key = _sidebarOpen ? _toolbarKey : _restoreKey;
-    final box = key.currentContext?.findRenderObject() as RenderBox?;
-    if (box == null || !box.hasSize) return;
-    final origin = box.localToGlobal(Offset.zero);
-    final size = box.size;
     final dpr = MediaQuery.devicePixelRatioOf(context);
-    final rect = <String, int>{
-      'left': (origin.dx * dpr).round(),
-      'top': (origin.dy * dpr).round(),
-      'right': ((origin.dx + size.width) * dpr).round(),
-      'bottom': ((origin.dy + size.height) * dpr).round(),
-    };
+    final rects = <Map<String, int>>[];
+    final toolbarRect = _hitTestRectForKey(
+      _sidebarOpen ? _toolbarKey : _restoreKey,
+      dpr,
+    );
+    if (toolbarRect != null) rects.add(toolbarRect);
+    // Bottom slide bar must stay clickable in board modes. Without this,
+    // clicks on previous/next fall through to the Windows taskbar below.
+    if (_isBoardMode) {
+      final slideRect = _hitTestRectForKey(_slideBarKey, dpr);
+      if (slideRect != null) rects.add(slideRect);
+    }
+    if (rects.isEmpty) return;
     try {
       await _nativeChannel.invokeMethod<bool>('setHitTestRects', {
-        'rects': [rect],
+        'rects': rects,
       });
     } catch (_) {}
   }
@@ -2007,6 +2024,7 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
     });
     unawaited(_fitOverlayToCurrentDisplay());
     _scheduleSave();
+    _scheduleHitTestSync();
   }
 
   void _selectHand() {
@@ -2067,6 +2085,7 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
       _draftPoints = <Offset>[];
     });
     _scheduleSave();
+    _scheduleHitTestSync();
   }
 
   void _addSlide() {
@@ -2093,6 +2112,7 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
       _boardPan[_mode] = cameraForSlide(created, _viewportSize);
     });
     _scheduleSave();
+    _scheduleHitTestSync();
   }
 
   /// Move on the tile map. Endless in all four directions: missing tiles
@@ -2163,6 +2183,7 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
       _scheduleSave();
     } finally {
       await _resumePassThroughAfterOverlay();
+      _scheduleHitTestSync();
     }
   }
 
@@ -3541,16 +3562,19 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
                         ? 68
                         : 12,
                     child: Center(
-                      child: _BoardSlideBar(
-                        slides: _activeSlides,
-                        activeId: _activeSlideId[_mode],
-                        onSelect: _selectSlide,
-                        onAdd: _addSlide,
-                        onPrevious: () => _stepSlideBy(-1, 0),
-                        onNext: () => _stepSlideBy(1, 0),
-                        onUp: () => _stepSlideBy(0, -1),
-                        onDown: () => _stepSlideBy(0, 1),
-                        onRename: _renameSlide,
+                      child: KeyedSubtree(
+                        key: _slideBarKey,
+                        child: _BoardSlideBar(
+                          slides: _activeSlides,
+                          activeId: _activeSlideId[_mode],
+                          onSelect: _selectSlide,
+                          onAdd: _addSlide,
+                          onPrevious: () => _stepSlideBy(-1, 0),
+                          onNext: () => _stepSlideBy(1, 0),
+                          onUp: () => _stepSlideBy(0, -1),
+                          onDown: () => _stepSlideBy(0, 1),
+                          onRename: _renameSlide,
+                        ),
                       ),
                     ),
                   ),

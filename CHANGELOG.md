@@ -1,5 +1,9 @@
 ﻿# Changelog
 
+## [1.7.1] - 2026-09-16
+### Fixed
+- Bottom slide bar in whiteboard and blackboard stays clickable when clicks pass through to the desktop (no tool, pointer, magnifier, or hidden toolbar), so previous/next no longer falls through to the Windows taskbar.
+
 ## [1.7.0] - 2026-09-16
 ### Fixed
 - Drag direction now feels natural: drag left to pull in the tile on the right, drag up to pull in the tile below. The old backwards mapping is fixed.
