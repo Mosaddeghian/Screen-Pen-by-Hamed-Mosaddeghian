@@ -142,6 +142,84 @@ void main() {
     expect(kPointerSlotId, '__pointer__');
   });
 
+  group('endless board slides', () {
+    test('default titles are numbers starting at 1', () {
+      expect(defaultSlideTitle(0), '1');
+      expect(defaultSlideTitle(1), '2');
+      expect(defaultSlideTitle(9), '10');
+    });
+
+    test('slide step follows drag direction and threshold', () {
+      const viewport = Size(1000, 800);
+      expect(
+        slideStepForPan(const Offset(500, 0), viewport),
+        BoardSlideStep.next,
+      );
+      expect(
+        slideStepForPan(const Offset(0, 400), viewport),
+        BoardSlideStep.next,
+      );
+      expect(
+        slideStepForPan(const Offset(-500, 0), viewport),
+        BoardSlideStep.previous,
+      );
+      expect(
+        slideStepForPan(const Offset(0, -400), viewport),
+        BoardSlideStep.previous,
+      );
+      expect(
+        slideStepForPan(const Offset(50, 20), viewport),
+        BoardSlideStep.stay,
+      );
+      expect(
+        slideStepForPan(Offset.zero, const Size(0, 0)),
+        BoardSlideStep.stay,
+      );
+    });
+
+    test('slides round-trip through JSON with drawings', () {
+      final source = BoardSlide(
+        id: 'slide-test-1',
+        title: 'My plan',
+        drawables: [
+          const LineDrawable(
+            Offset(10, 10),
+            Offset(90, 10),
+            Color(0xffffffff),
+            4,
+          ),
+        ],
+      );
+      final restored = BoardSlide.fromJson(source.toJson());
+      expect(restored.id, 'slide-test-1');
+      expect(restored.title, 'My plan');
+      expect(restored.drawables, hasLength(1));
+      expect(
+        jsonEncode(restored.toJson()),
+        jsonEncode(source.toJson()),
+      );
+    });
+
+    test('blank slide title falls back instead of breaking', () {
+      final restored = BoardSlide.fromJson({
+        'id': 'slide-blank',
+        'title': '   ',
+        'drawables': [],
+      });
+      expect(restored.title.isNotEmpty, isTrue);
+    });
+
+    test('slide index lookup stays safe for unknown ids', () {
+      final slides = [
+        BoardSlide(id: 'a', title: '1'),
+        BoardSlide(id: 'b', title: '2'),
+      ];
+      expect(indexOfBoardSlide(slides, 'b'), 1);
+      expect(indexOfBoardSlide(slides, 'missing'), 0);
+      expect(indexOfBoardSlide(slides, null), 0);
+    });
+  });
+
   test('line axis constraint follows the dominant drag direction', () {
     expect(
       constrainLineToAxis(const Offset(10, 20), const Offset(80, 50)),
@@ -966,6 +1044,78 @@ void main() {
     expect(ToolType.highlighter.icon, isNull);
     expect(ToolType.highlighter.toolbarIcon, isA<Widget>());
     expect(ToolType.text.icon, Icons.title);
+  });
+
+  testWidgets('whiteboard shows slide bar with Hand tool', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(const PenApp());
+    await tester.pumpAndSettle();
+
+    // Screen mode has no slides.
+    expect(find.byKey(const ValueKey('slide-bar')), findsNothing);
+
+    await tester.tap(find.byTooltip('Whiteboard'));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('slide-bar')), findsOneWidget);
+    expect(find.byKey(const ValueKey('slide-chip-0')), findsOneWidget);
+    expect(find.byKey(const ValueKey('tool-hand')), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('tool-hand')));
+    await tester.pumpAndSettle();
+    expect(_toolSelected(tester, 'hand'), isTrue);
+
+    // Hand drag must not draw.
+    await tester.timedDragFrom(
+      const Offset(500, 400),
+      const Offset(40, 20),
+      const Duration(milliseconds: 120),
+    );
+    await tester.pumpAndSettle();
+    expect(_annotationPainter(tester).drawables, isEmpty);
+  });
+
+  testWidgets('dragging far with Hand goes to next slide', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(const PenApp());
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Whiteboard'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('tool-hand')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('slide-chip-0')), findsOneWidget);
+    expect(find.byKey(const ValueKey('slide-chip-1')), findsNothing);
+
+    // Far right drag = next slide (new slide created endlessly).
+    await tester.timedDragFrom(
+      const Offset(400, 400),
+      const Offset(700, 20),
+      const Duration(milliseconds: 200),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('slide-chip-1')), findsOneWidget);
+  });
+
+  testWidgets('slide add button creates another numbered slide', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(const PenApp());
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Blackboard'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('slide-add')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('slide-chip-1')), findsOneWidget);
   });
 }
 

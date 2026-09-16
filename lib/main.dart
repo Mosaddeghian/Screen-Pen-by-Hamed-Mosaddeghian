@@ -17,7 +17,7 @@ import 'package:window_manager/window_manager.dart';
 const MethodChannel _nativeChannel = MethodChannel('pen/native');
 
 /// Shown in Settings. Keep in sync with `pubspec.yaml` and `CHANGELOG.md`.
-const kAppVersion = '1.5.1';
+const kAppVersion = '1.6.0';
 
 const int _vkShift = 0x10;
 const int _shiftKeyDownBit = 0x8000;
@@ -602,6 +602,110 @@ Drawable? drawableFromJson(Map<String, dynamic> json) {
   }
 }
 
+/// Hand tool id. Like eraser/magnifier it is a mode, not a saved ToolSlot.
+const String kHandSlotId = '__hand__';
+
+/// How far (share of screen width/height) you must drag to change slide.
+const double kSlidePanFraction = 0.4;
+
+/// Key you can hold to move the board while a drawing tool is still selected.
+enum BoardPanKey { space, control, alt }
+
+extension BoardPanKeyX on BoardPanKey {
+  String get label => switch (this) {
+    BoardPanKey.space => 'Space',
+    BoardPanKey.control => 'Control',
+    BoardPanKey.alt => 'Alt',
+  };
+}
+
+/// True when the chosen move-key is currently held down.
+bool isBoardPanKeyHeld(BoardPanKey key) {
+  final keyboard = HardwareKeyboard.instance;
+  return switch (key) {
+    BoardPanKey.space => keyboard.logicalKeysPressed.contains(
+      LogicalKeyboardKey.space,
+    ),
+    BoardPanKey.control => keyboard.isControlPressed,
+    BoardPanKey.alt => keyboard.isAltPressed,
+  };
+}
+
+/// Default slide name is just its number: 1, 2, 3...
+String defaultSlideTitle(int index) => '${index + 1}';
+
+String newBoardSlideId() =>
+    'slide-${DateTime.now().microsecondsSinceEpoch}';
+
+/// Which way a finished drag wants to go.
+enum BoardSlideStep { previous, stay, next }
+
+/// Drag right/down far enough -> next. Drag left/up far enough -> previous.
+/// Otherwise stay. Used by whiteboard/blackboard slide switching.
+BoardSlideStep slideStepForPan(
+  Offset pan,
+  Size viewport, {
+  double fraction = kSlidePanFraction,
+}) {
+  if (viewport.width <= 0 || viewport.height <= 0) {
+    return BoardSlideStep.stay;
+  }
+  final thresholdX = viewport.width * fraction;
+  final thresholdY = viewport.height * fraction;
+  if (pan.dx >= thresholdX || pan.dy >= thresholdY) {
+    return BoardSlideStep.next;
+  }
+  if (pan.dx <= -thresholdX || pan.dy <= -thresholdY) {
+    return BoardSlideStep.previous;
+  }
+  return BoardSlideStep.stay;
+}
+
+int indexOfBoardSlide(List<BoardSlide> slides, String? id) {
+  if (id == null) return 0;
+  final index = slides.indexWhere((slide) => slide.id == id);
+  return index < 0 ? 0 : index;
+}
+
+/// One page on an endless board. Each slide keeps its own drawings.
+class BoardSlide {
+  BoardSlide({required this.id, required this.title, List<Drawable>? drawables})
+    : drawables = drawables ?? <Drawable>[];
+
+  final String id;
+  String title;
+  final List<Drawable> drawables;
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'title': title,
+    'drawables': drawables.map((item) => item.toJson()).toList(),
+  };
+
+  factory BoardSlide.fromJson(Map<String, dynamic> json) {
+    final drawables = <Drawable>[];
+    final raw = json['drawables'] as List?;
+    if (raw != null) {
+      for (final item in raw) {
+        try {
+          final drawable = drawableFromJson(item as Map<String, dynamic>);
+          if (drawable != null) drawables.add(drawable);
+        } catch (_) {
+          // Skip one bad drawing without losing the whole slide.
+        }
+      }
+    }
+    final rawTitle = json['title'] as String?;
+    return BoardSlide(
+      id: json['id'] as String,
+      title: (rawTitle == null || rawTitle.trim().isEmpty)
+          ? '1'
+          : rawTitle.trim(),
+      drawables: drawables,
+    );
+  }
+}
+
 class PenApp extends StatelessWidget {
   const PenApp({super.key});
 
@@ -642,6 +746,24 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
   final _undo = <CanvasMode, List<List<Drawable>>>{
     for (final mode in CanvasMode.values) mode: <List<Drawable>>[],
   };
+  final _boardSlides = <CanvasMode, List<BoardSlide>>{
+    CanvasMode.whiteboard: [
+      BoardSlide(id: 'slide-whiteboard-1', title: '1'),
+    ],
+    CanvasMode.blackboard: [
+      BoardSlide(id: 'slide-blackboard-1', title: '1'),
+    ],
+  };
+  final _activeSlideId = <CanvasMode, String?>{
+    CanvasMode.whiteboard: 'slide-whiteboard-1',
+    CanvasMode.blackboard: 'slide-blackboard-1',
+  };
+  final _boardPan = <CanvasMode, Offset>{
+    for (final mode in CanvasMode.values) mode: Offset.zero,
+  };
+  final _slideUndo = <String, List<List<Drawable>>>{};
+  BoardPanKey _panKey = BoardPanKey.space;
+  bool _isPanningBoard = false;
 
   final _quickColors = <Color>[
     const Color(0xff35a7ff),
@@ -754,12 +876,43 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
   Timer? _magnifierTimer;
   Timer? _saveTimer;
   Timer? _shiftPollTimer;
+  Offset? _panStartLocal;
+  Offset _panBase = Offset.zero;
+  bool _middlePanArmed = false;
 
   bool get _isEraserSelected => _activeSlotId == '__eraser__';
   bool get _isMagnifierSelected => _activeSlotId == '__magnifier__';
   bool get _isPointerMode => _activeSlotId == kPointerSlotId;
+  bool get _isHandSelected => _activeSlotId == kHandSlotId;
   bool get _isIdleDesktop => _activeSlotId == null;
   bool get _hasDrawingTool => _activeSlotId != null && !_isPointerMode;
+  bool get _isBoardMode =>
+      _mode == CanvasMode.whiteboard || _mode == CanvasMode.blackboard;
+  List<BoardSlide> get _activeSlides {
+    if (!_isBoardMode) return const <BoardSlide>[];
+    return _boardSlides[_mode]!;
+  }
+
+  BoardSlide _ensureActiveSlide() {
+    final slides = _boardSlides[_mode]!;
+    if (slides.isEmpty) {
+      final created = BoardSlide(
+        id: newBoardSlideId(),
+        title: defaultSlideTitle(0),
+      );
+      slides.add(created);
+      _activeSlideId[_mode] = created.id;
+      return created;
+    }
+    final id = _activeSlideId[_mode];
+    for (final slide in slides) {
+      if (slide.id == id) return slide;
+    }
+    _activeSlideId[_mode] = slides.first.id;
+    return slides.first;
+  }
+
+  Offset get _activePan => _boardPan[_mode] ?? Offset.zero;
 
   /// Desktop click-through when idle, pointer, or magnifier is active (toolbar
   /// still hit-tests), or when the toolbar is collapsed.
@@ -774,6 +927,7 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
     if (id == null ||
         id == '__eraser__' ||
         id == kPointerSlotId ||
+        id == kHandSlotId ||
         id == '__magnifier__') {
       return null;
     }
@@ -784,7 +938,10 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
   }
 
   ToolSlot get _activeSlot => _selectedSlot ?? _slots.first;
-  List<Drawable> get _activeDrawables => _canvas[_mode]!;
+  List<Drawable> get _activeDrawables {
+    if (_mode == CanvasMode.screen) return _canvas[_mode]!;
+    return _ensureActiveSlide().drawables;
+  }
   Offset? get _previewLineEnd =>
       _draftEnd == null ? null : _effectiveLineEnd(_draftEnd!);
 
@@ -1070,6 +1227,10 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
       }
 
       final rawCanvas = prefs.getString('canvas_data');
+      final legacyBoardDrawings = <CanvasMode, List<Drawable>>{
+        CanvasMode.whiteboard: <Drawable>[],
+        CanvasMode.blackboard: <Drawable>[],
+      };
       if (rawCanvas != null) {
         final decoded = jsonDecode(rawCanvas) as Map<String, dynamic>;
         for (final mode in CanvasMode.values) {
@@ -1078,10 +1239,91 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
           for (final item in list) {
             try {
               final drawable = drawableFromJson(item as Map<String, dynamic>);
-              if (drawable != null) _canvas[mode]!.add(drawable);
+              if (drawable != null) {
+                _canvas[mode]!.add(drawable);
+                if (mode != CanvasMode.screen) {
+                  legacyBoardDrawings[mode]!.add(drawable);
+                }
+              }
             } catch (_) {
               // Ignore a malformed object without discarding the full canvas.
             }
+          }
+        }
+      }
+      // Endless boards: each whiteboard/blackboard mode keeps its own slides.
+      var loadedSlides = false;
+      final rawSlides = prefs.getString('board_slides');
+      if (rawSlides != null) {
+        try {
+          final decoded = jsonDecode(rawSlides) as Map<String, dynamic>;
+          for (final mode in [CanvasMode.whiteboard, CanvasMode.blackboard]) {
+            final list = decoded[mode.name] as List?;
+            if (list == null) continue;
+            final slides = <BoardSlide>[];
+            for (final item in list) {
+              try {
+                slides.add(
+                  BoardSlide.fromJson(item as Map<String, dynamic>),
+                );
+              } catch (_) {
+                // Skip one bad slide without losing the whole board.
+              }
+            }
+            if (slides.isNotEmpty) {
+              _boardSlides[mode] = slides;
+              loadedSlides = true;
+            }
+          }
+        } catch (_) {
+          // Fall back to legacy single-list boards below.
+        }
+      }
+      if (!loadedSlides) {
+        // First run after the endless-board update: keep old drawings
+        // on Slide 1 so nothing is lost.
+        for (final mode in [CanvasMode.whiteboard, CanvasMode.blackboard]) {
+          final old = legacyBoardDrawings[mode]!;
+          if (old.isNotEmpty) {
+            final first = _boardSlides[mode]!.first;
+            first.drawables
+              ..clear()
+              ..addAll(old);
+          }
+        }
+      }
+      final rawActiveSlides = prefs.getString('board_active_slide');
+      if (rawActiveSlides != null) {
+        try {
+          final decoded = jsonDecode(rawActiveSlides) as Map<String, dynamic>;
+          for (final mode in [CanvasMode.whiteboard, CanvasMode.blackboard]) {
+            final id = decoded[mode.name] as String?;
+            if (id != null &&
+                _boardSlides[mode]!.any((slide) => slide.id == id)) {
+              _activeSlideId[mode] = id;
+            } else {
+              _activeSlideId[mode] = _boardSlides[mode]!.first.id;
+            }
+          }
+        } catch (_) {
+          // Keep default Slide 1 if the saved slide is bad.
+        }
+      }
+      // Fix slide titles that are still blank after an old save.
+      for (final mode in [CanvasMode.whiteboard, CanvasMode.blackboard]) {
+        final slides = _boardSlides[mode]!;
+        for (var i = 0; i < slides.length; i++) {
+          if (slides[i].title.trim().isEmpty) {
+            slides[i].title = defaultSlideTitle(i);
+          }
+        }
+      }
+      final panName = prefs.getString('board_pan_key');
+      if (panName != null) {
+        for (final key in BoardPanKey.values) {
+          if (key.name == panName) {
+            _panKey = key;
+            break;
           }
         }
       }
@@ -1090,6 +1332,7 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
       if (savedSlot == '__none__') {
         _activeSlotId = null;
       } else if (savedSlot == kPointerSlotId ||
+          savedSlot == kHandSlotId ||
           savedSlot == '__eraser__' ||
           savedSlot == '__magnifier__' ||
           (savedSlot != null && _slots.any((slot) => slot.id == savedSlot))) {
@@ -1258,9 +1501,11 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
     setState(() {
       _activeSlotId = id;
       _paletteOpen = false;
+      _isPanningBoard = false;
       if (id != null &&
           id != '__magnifier__' &&
           id != kPointerSlotId &&
+          id != kHandSlotId &&
           id != '__eraser__') {
         _toolBeforeCollapse = id;
       }
@@ -1481,16 +1726,45 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
     await prefs.setString('magnifier_zoom', _magnifierZoom.name);
     await prefs.setString('magnifier_size', _magnifierSize.name);
     await prefs.setString('screenshot_folder', _screenshotFolder);
+    await prefs.setString('board_pan_key', _panKey.name);
     if (_rememberContent) {
+      // Screen mode still uses the old single list. Boards use slides.
+      final screenDrawings = _canvas[CanvasMode.screen]!
+          .map((item) => item.toJson())
+          .toList();
       await prefs.setString(
         'canvas_data',
         jsonEncode({
-          for (final mode in CanvasMode.values)
-            mode.name: _canvas[mode]!.map((item) => item.toJson()).toList(),
+          CanvasMode.screen.name: screenDrawings,
+          // Keep board drawings here too for very old backups.
+          for (final mode in [CanvasMode.whiteboard, CanvasMode.blackboard])
+            mode.name: _boardSlides[mode]!.isNotEmpty
+                ? _boardSlides[mode]!.first.drawables
+                      .map((item) => item.toJson())
+                      .toList()
+                : <Map<String, dynamic>>[],
+        }),
+      );
+      await prefs.setString(
+        'board_slides',
+        jsonEncode({
+          for (final mode in [CanvasMode.whiteboard, CanvasMode.blackboard])
+            mode.name: _boardSlides[mode]!
+                .map((slide) => slide.toJson())
+                .toList(),
+        }),
+      );
+      await prefs.setString(
+        'board_active_slide',
+        jsonEncode({
+          for (final mode in [CanvasMode.whiteboard, CanvasMode.blackboard])
+            mode.name: _activeSlideId[mode],
         }),
       );
     } else {
       await prefs.remove('canvas_data');
+      await prefs.remove('board_slides');
+      await prefs.remove('board_active_slide');
     }
   }
 
@@ -1544,14 +1818,36 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
     }
   }
 
+  String get _activeUndoKey {
+    if (_mode == CanvasMode.screen) return 'screen';
+    return _ensureActiveSlide().id;
+  }
+
+  List<List<Drawable>> _undoStackForActive() {
+    if (_mode == CanvasMode.screen) return _undo[_mode]!;
+    return _slideUndo.putIfAbsent(_activeUndoKey, () => <List<Drawable>>[]);
+  }
+
   void _pushUndo() {
-    _undo[_mode]!.add(List<Drawable>.from(_activeDrawables));
-    if (_undo[_mode]!.length > 50) _undo[_mode]!.removeAt(0);
+    final stack = _undoStackForActive();
+    stack.add(List<Drawable>.from(_activeDrawables));
+    if (stack.length > 50) stack.removeAt(0);
   }
 
   void _undoLast() {
-    if (_undo[_mode]!.isEmpty) return;
-    setState(() => _canvas[_mode] = _undo[_mode]!.removeLast());
+    final stack = _undoStackForActive();
+    if (stack.isEmpty) return;
+    final previous = stack.removeLast();
+    setState(() {
+      if (_mode == CanvasMode.screen) {
+        _canvas[_mode] = previous;
+      } else {
+        final slide = _ensureActiveSlide();
+        slide.drawables
+          ..clear()
+          ..addAll(previous);
+      }
+    });
     _scheduleSave();
   }
 
@@ -1564,12 +1860,149 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
 
   void _selectMode(CanvasMode mode) {
     if (_mode == mode) return;
+    if (_editingText) _commitInlineText();
+    _commitPendingCandle();
     setState(() {
       _mode = mode;
       _paletteOpen = false;
+      _isPanningBoard = false;
+      _boardPan[mode] = Offset.zero;
     });
     unawaited(_fitOverlayToCurrentDisplay());
     _scheduleSave();
+  }
+
+  void _selectHand() {
+    unawaited(
+      _setActiveSlot(_activeSlotId == kHandSlotId ? null : kHandSlotId),
+    );
+  }
+
+  bool get _panKeyHeldNow {
+    try {
+      return isBoardPanKeyHeld(_panKey);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  List<BoardSlide> _slidesFor(CanvasMode mode) {
+    if (mode == CanvasMode.screen) return const <BoardSlide>[];
+    final slides = _boardSlides[mode]!;
+    if (slides.isEmpty) {
+      final created = BoardSlide(id: newBoardSlideId(), title: '1');
+      slides.add(created);
+      _activeSlideId[mode] = created.id;
+    }
+    return slides;
+  }
+
+  void _selectSlide(String id) {
+    if (!_isBoardMode) return;
+    if (_editingText) _commitInlineText();
+    _commitPendingCandle();
+    setState(() {
+      _activeSlideId[_mode] = id;
+      _boardPan[_mode] = Offset.zero;
+      _isPanningBoard = false;
+      _draftStart = null;
+      _draftEnd = null;
+      _draftPoints = <Offset>[];
+    });
+    _scheduleSave();
+  }
+
+  void _addSlide() {
+    if (!_isBoardMode) return;
+    if (_editingText) _commitInlineText();
+    _commitPendingCandle();
+    final slides = _slidesFor(_mode);
+    final created = BoardSlide(
+      id: newBoardSlideId(),
+      title: defaultSlideTitle(slides.length),
+    );
+    setState(() {
+      slides.add(created);
+      _activeSlideId[_mode] = created.id;
+      _boardPan[_mode] = Offset.zero;
+    });
+    _scheduleSave();
+  }
+
+  void _stepSlide(BoardSlideStep step) {
+    if (!_isBoardMode) return;
+    final slides = _slidesFor(_mode);
+    var index = indexOfBoardSlide(slides, _activeSlideId[_mode]);
+    if (step == BoardSlideStep.next) {
+      index++;
+      if (index >= slides.length) {
+        slides.add(
+          BoardSlide(id: newBoardSlideId(), title: defaultSlideTitle(index)),
+        );
+      }
+      _selectSlide(slides[index].id);
+    } else if (step == BoardSlideStep.previous) {
+      if (index <= 0) {
+        // First slide has nowhere to go back to: stay and reset the drag.
+        setState(() => _boardPan[_mode] = Offset.zero);
+        return;
+      }
+      _selectSlide(slides[index - 1].id);
+    } else {
+      setState(() => _boardPan[_mode] = Offset.zero);
+    }
+  }
+
+  void _commitBoardPan() {
+    if (!_isBoardMode) {
+      _isPanningBoard = false;
+      return;
+    }
+    final pan = _activePan;
+    final size = MediaQuery.maybeOf(context)?.size ?? const Size(1180, 760);
+    final step = slideStepForPan(pan, size);
+    _isPanningBoard = false;
+    _stepSlide(step);
+  }
+
+  Future<void> _renameSlide(BoardSlide slide) async {
+    await _suspendPassThroughForOverlay();
+    try {
+      if (!mounted) return;
+      final controller = TextEditingController(text: slide.title);
+      final result = await showDialog<String>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Rename slide'),
+          content: TextField(
+            key: const ValueKey('slide-rename-field'),
+            controller: controller,
+            autofocus: true,
+            maxLength: 30,
+            decoration: const InputDecoration(hintText: 'Slide name'),
+            onSubmitted: (value) => Navigator.pop(context, value),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, controller.text),
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      );
+      controller.dispose();
+      if (!mounted || result == null) return;
+      final trimmed = result.trim();
+      if (trimmed.isEmpty) return;
+      setState(() => slide.title = trimmed);
+      _scheduleSave();
+    } finally {
+      await _resumePassThroughAfterOverlay();
+    }
   }
 
   void _setToolbarDock(ToolbarDock dock) {
@@ -1653,8 +2086,23 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
     unawaited(_setActiveSlot(rectSlots[nextIndex].id));
   }
 
+  bool _shouldPanBoard() {
+    if (!_isBoardMode) return false;
+    if (_isMagnifierSelected) return false;
+    if (_middlePanArmed) return true;
+    if (_isPointerMode || _isIdleDesktop) return false;
+    if (_isHandSelected) return true;
+    return _panKeyHeldNow;
+  }
+
   void _onCanvasPointerDown(PointerDownEvent event) {
     if (_passThroughOverlayDepth > 0) return;
+    if ((event.buttons & kMiddleMouseButton) != 0) {
+      if (_isBoardMode) {
+        _middlePanArmed = true;
+      }
+      return;
+    }
     if ((event.buttons & kSecondaryMouseButton) != 0) {
       if (_hasDrawingTool) {
         _selectIdleDesktop();
@@ -1777,6 +2225,15 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
   }
 
   void _startDrawing(DragStartDetails details) {
+    if (_shouldPanBoard()) {
+      _keyboardFocus.requestFocus();
+      _isPanningBoard = true;
+      _panStartLocal = details.localPosition;
+      _panBase = _activePan;
+      _pointerPosition = details.localPosition;
+      setState(() {});
+      return;
+    }
     if (!_hasDrawingTool) return;
     _keyboardFocus.requestFocus();
     _shiftPressed = isShiftHeld();
@@ -1798,6 +2255,30 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
   }
 
   void _updateDrawing(DragUpdateDetails details) {
+    if (_isPanningBoard) {
+      final start = _panStartLocal;
+      if (start != null) {
+        _pointerPosition = details.localPosition;
+        setState(() {
+          _boardPan[_mode] = _panBase + (details.localPosition - start);
+        });
+      }
+      return;
+    }
+    if (_shouldPanBoard()) {
+      // Pan-key pressed mid-gesture: switch from drawing to moving.
+      _isPanningBoard = true;
+      _panStartLocal = details.localPosition;
+      _panBase = _activePan;
+      _pointerPosition = details.localPosition;
+      _stopShiftPoll();
+      setState(() {
+        _draftStart = null;
+        _draftEnd = null;
+        _draftPoints = <Offset>[];
+      });
+      return;
+    }
     if (!_hasDrawingTool) return;
     _pointerPosition = details.localPosition;
     if (_isEraserSelected) {
@@ -1818,6 +2299,16 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
 
   void _cancelDrawing() {
     _stopShiftPoll();
+    if (_isPanningBoard) {
+      _middlePanArmed = false;
+      setState(() {
+        _boardPan[_mode] = Offset.zero;
+        _isPanningBoard = false;
+        _panStartLocal = null;
+      });
+      return;
+    }
+    _middlePanArmed = false;
     if (_draftStart == null && _draftEnd == null && _draftPoints.isEmpty) {
       return;
     }
@@ -1830,6 +2321,13 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
 
   void _finishDrawing(DragEndDetails details) {
     _stopShiftPoll();
+    if (_isPanningBoard) {
+      _middlePanArmed = false;
+      _panStartLocal = null;
+      _commitBoardPan();
+      return;
+    }
+    _middlePanArmed = false;
     if (!_hasDrawingTool) return;
     if (_isEraserSelected) {
       if (_eraserGestureChanged) _scheduleSave();
@@ -1939,6 +2437,7 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
   }
 
   void _canvasTap(TapUpDetails details) {
+    if (_isHandSelected) return;
     if (!_hasDrawingTool) return;
     _pointerPosition = details.localPosition;
     if (_isEraserSelected) {
@@ -2337,6 +2836,28 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
                       },
                     ),
                     const Divider(),
+                    const _SettingSectionTitle('Board moving'),
+                    const Text(
+                      'Hold this key and drag to move endless whiteboard/blackboard. The Hand tool always moves.',
+                      style: TextStyle(fontSize: 12, color: Colors.white60),
+                    ),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      children: [
+                        for (final key in BoardPanKey.values)
+                          ChoiceChip(
+                            key: ValueKey('pan-key-${key.name}'),
+                            label: Text(key.label),
+                            selected: _panKey == key,
+                            onSelected: (_) {
+                              setDialogState(() => _panKey = key);
+                              setState(() {});
+                            },
+                          ),
+                      ],
+                    ),
+                    const Divider(),
                     const _SettingSectionTitle('Screenshots'),
                     ListTile(
                       contentPadding: EdgeInsets.zero,
@@ -2460,28 +2981,52 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
     if (event is KeyDownEvent &&
         event.logicalKey == LogicalKeyboardKey.escape) {
       _commitPendingCandle();
+      if (_isPanningBoard) {
+        setState(() {
+          _boardPan[_mode] = Offset.zero;
+          _isPanningBoard = false;
+        });
+      }
       return;
     }
     if (event is! KeyDownEvent) return;
     final isCtrlShift =
         HardwareKeyboard.instance.isControlPressed &&
         HardwareKeyboard.instance.isShiftPressed;
-    if (!isCtrlShift) return;
-    switch (event.logicalKey) {
-      case LogicalKeyboardKey.keyW:
-        _selectMode(CanvasMode.whiteboard);
-      case LogicalKeyboardKey.keyB:
-        _selectMode(CanvasMode.blackboard);
-      case LogicalKeyboardKey.keyZ:
-        _undoLast();
-      case LogicalKeyboardKey.keyS:
-        unawaited(_takeScreenshot());
-      case LogicalKeyboardKey.keyH:
-        unawaited(_setSidebarOpen(!_sidebarOpen));
-      case LogicalKeyboardKey.keyP:
-        unawaited(_togglePointerMode());
-      case LogicalKeyboardKey.keyQ:
-        unawaited(_shutdown());
+    if (isCtrlShift) {
+      switch (event.logicalKey) {
+        case LogicalKeyboardKey.keyW:
+          _selectMode(CanvasMode.whiteboard);
+        case LogicalKeyboardKey.keyB:
+          _selectMode(CanvasMode.blackboard);
+        case LogicalKeyboardKey.keyZ:
+          _undoLast();
+        case LogicalKeyboardKey.keyS:
+          unawaited(_takeScreenshot());
+        case LogicalKeyboardKey.keyH:
+          unawaited(_setSidebarOpen(!_sidebarOpen));
+        case LogicalKeyboardKey.keyP:
+          unawaited(_togglePointerMode());
+        case LogicalKeyboardKey.keyQ:
+          unawaited(_shutdown());
+      }
+      return;
+    }
+    // Endless board shortcuts (no Ctrl+Shift needed).
+    if (!_isBoardMode) return;
+    final noModifiers =
+        !HardwareKeyboard.instance.isControlPressed &&
+        !HardwareKeyboard.instance.isAltPressed;
+    if (event.logicalKey == LogicalKeyboardKey.pageDown ||
+        event.logicalKey == LogicalKeyboardKey.arrowDown ||
+        event.logicalKey == LogicalKeyboardKey.arrowRight) {
+      _stepSlide(BoardSlideStep.next);
+    } else if (event.logicalKey == LogicalKeyboardKey.pageUp ||
+        event.logicalKey == LogicalKeyboardKey.arrowUp ||
+        event.logicalKey == LogicalKeyboardKey.arrowLeft) {
+      _stepSlide(BoardSlideStep.previous);
+    } else if (noModifiers && event.logicalKey == LogicalKeyboardKey.keyH) {
+      _selectHand();
     }
   }
 
@@ -2527,12 +3072,14 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
       CanvasMode.blackboard => Colors.black,
     };
     final annotationActive =
-        _hasDrawingTool &&
+        (_hasDrawingTool || _isHandSelected) &&
         _sidebarOpen &&
         !_isMagnifierSelected &&
         !_isPointerMode;
     final toolCursorKind = annotationActive
-        ? (_isEraserSelected
+        ? (_isHandSelected
+              ? null
+              : _isEraserSelected
               ? ToolCursorKind.eraser
               : switch (_activeSlot.type) {
                   ToolType.pen => ToolCursorKind.pen,
@@ -2575,6 +3122,8 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
                       // beside it so the arrow tip shows the exact draw point.
                       cursor: _isMagnifierSelected
                           ? SystemMouseCursors.none
+                          : _isHandSelected || _isPanningBoard
+                          ? SystemMouseCursors.move
                           : SystemMouseCursors.basic,
                       onHover: (event) {
                         if (!annotationActive &&
@@ -2627,6 +3176,7 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
                                   ? _pointerPosition
                                   : null,
                               magnifierLensSize: _magnifierSize.lensSize,
+                              panOffset: _isBoardMode ? _activePan : Offset.zero,
                             ),
                             child: const SizedBox.expand(),
                           ),
@@ -2689,6 +3239,7 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
                         onPointer: _selectPointerMode,
                         onMode: _selectMode,
                         onSlot: _toggleSlot,
+                        onHand: _selectHand,
                         onEraser: _selectEraser,
                         onMagnifier: _selectMagnifier,
                         onMagnifierZoom: _setMagnifierZoom,
@@ -2742,6 +3293,27 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
                       ),
                     ),
                   ),
+                if (_isBoardMode)
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom:
+                        (_toolbarDock == ToolbarDock.bottom && _sidebarOpen)
+                        ? 68
+                        : 12,
+                    child: Center(
+                      child: _BoardSlideBar(
+                        slides: _activeSlides,
+                        activeId: _activeSlideId[_mode],
+                        onSelect: _selectSlide,
+                        onAdd: _addSlide,
+                        onPrevious: () =>
+                            _stepSlide(BoardSlideStep.previous),
+                        onNext: () => _stepSlide(BoardSlideStep.next),
+                        onRename: _renameSlide,
+                      ),
+                    ),
+                  ),
               ],
             ),
           ),
@@ -2776,6 +3348,7 @@ class AnnotationPainter extends CustomPainter {
     this.magnifierImage,
     this.magnifierCenter,
     this.magnifierLensSize = const Size(220, 150),
+    this.panOffset = Offset.zero,
   });
 
   final List<Drawable> drawables;
@@ -2791,9 +3364,13 @@ class AnnotationPainter extends CustomPainter {
   final ui.Image? magnifierImage;
   final Offset? magnifierCenter;
   final Size magnifierLensSize;
+  final Offset panOffset;
 
   @override
   void paint(Canvas canvas, Size size) {
+    canvas.save();
+    // Endless board drag: shift the whole slide without drawing any border.
+    canvas.translate(panOffset.dx, panOffset.dy);
     for (final item in drawables) {
       _paintDrawable(canvas, item);
     }
@@ -2881,6 +3458,7 @@ class AnnotationPainter extends CustomPainter {
     } else if (pendingCandle != null) {
       _paintDrawable(canvas, pendingCandle!);
     }
+    canvas.restore();
     if (showPointer && pointerPosition != null) {
       final halo = Paint()
         ..color = const Color(0xff35a7ff).withValues(alpha: .22);
@@ -3116,6 +3694,146 @@ class AnnotationPainter extends CustomPainter {
   bool shouldRepaint(covariant AnnotationPainter oldDelegate) => true;
 }
 
+/// Bottom slide picker for endless whiteboard/blackboard.
+///
+/// Shows one chip per slide. Tap a name to jump there.
+/// Double-tap a name (or tap the pencil) to rename it.
+class _BoardSlideBar extends StatelessWidget {
+  const _BoardSlideBar({
+    required this.slides,
+    required this.activeId,
+    required this.onSelect,
+    required this.onAdd,
+    required this.onPrevious,
+    required this.onNext,
+    required this.onRename,
+  });
+
+  final List<BoardSlide> slides;
+  final String? activeId;
+  final ValueChanged<String> onSelect;
+  final VoidCallback onAdd;
+  final VoidCallback onPrevious;
+  final VoidCallback onNext;
+  final ValueChanged<BoardSlide> onRename;
+
+  @override
+  Widget build(BuildContext context) {
+    final activeIndex = indexOfBoardSlide(slides, activeId);
+    return Material(
+      key: const ValueKey('slide-bar'),
+      color: const Color(0xff202735).withValues(alpha: .96),
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        constraints: const BoxConstraints(maxWidth: 640),
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            IconButton(
+              key: const ValueKey('slide-prev'),
+              tooltip: 'Previous slide',
+              iconSize: 18,
+              visualDensity: VisualDensity.compact,
+              onPressed: onPrevious,
+              icon: const Icon(Icons.chevron_left),
+            ),
+            Flexible(
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    for (var i = 0; i < slides.length; i++)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 2),
+                        child: GestureDetector(
+                          onTap: () => onSelect(slides[i].id),
+                          onDoubleTap: () => onRename(slides[i]),
+                          child: Container(
+                            key: ValueKey('slide-chip-$i'),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 6,
+                            ),
+                            decoration: BoxDecoration(
+                              color: slides[i].id == activeId
+                                  ? const Color(0xff2d8ac7)
+                                  : Colors.white.withValues(alpha: .08),
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(
+                                color: slides[i].id == activeId
+                                    ? Colors.white70
+                                    : Colors.white24,
+                              ),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Tooltip(
+                                  message:
+                                      'Go to slide ${slides[i].title} (double-tap to rename)',
+                                  child: Text(
+                                    slides[i].title,
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ),
+                                if (slides[i].id == activeId)
+                                  InkWell(
+                                    key: ValueKey('slide-rename-$i'),
+                                    borderRadius: BorderRadius.circular(6),
+                                    onTap: () => onRename(slides[i]),
+                                    child: const Padding(
+                                      padding: EdgeInsets.only(left: 6),
+                                      child: Icon(Icons.edit, size: 12),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+            IconButton(
+              key: const ValueKey('slide-next'),
+              tooltip: 'Next slide',
+              iconSize: 18,
+              visualDensity: VisualDensity.compact,
+              onPressed: onNext,
+              icon: const Icon(Icons.chevron_right),
+            ),
+            IconButton(
+              key: const ValueKey('slide-add'),
+              tooltip: 'Add slide',
+              iconSize: 18,
+              visualDensity: VisualDensity.compact,
+              onPressed: onAdd,
+              icon: const Icon(Icons.add),
+            ),
+            Padding(
+              padding: const EdgeInsets.only(right: 6),
+              child: Text(
+                '${activeIndex + 1}/${slides.length}',
+                style: const TextStyle(
+                  fontSize: 11,
+                  color: Colors.white60,
+                  fontFeatures: [],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _Sidebar extends StatelessWidget {
   const _Sidebar({
     required this.dock,
@@ -3135,6 +3853,7 @@ class _Sidebar extends StatelessWidget {
     required this.onPointer,
     required this.onMode,
     required this.onSlot,
+    required this.onHand,
     required this.onEraser,
     required this.onMagnifier,
     required this.onMagnifierZoom,
@@ -3170,6 +3889,7 @@ class _Sidebar extends StatelessWidget {
   final VoidCallback onPointer;
   final ValueChanged<CanvasMode> onMode;
   final ValueChanged<ToolSlot> onSlot;
+  final VoidCallback onHand;
   final VoidCallback onEraser;
   final VoidCallback onMagnifier;
   final ValueChanged<MagnifierZoom> onMagnifierZoom;
@@ -3287,6 +4007,13 @@ class _Sidebar extends StatelessWidget {
       ),
       const Divider(height: 10, color: Colors.white24),
       _ToolIcon(
+        buttonKey: const ValueKey('tool-hand'),
+        icon: Icons.pan_tool_outlined,
+        label: 'Hand (drag to move the board)',
+        selected: activeSlotId == kHandSlotId,
+        onPressed: onHand,
+      ),
+      _ToolIcon(
         iconWidget: const _EraserIcon(),
         label: 'Eraser (click or drag over objects)',
         selected: activeSlotId == '__eraser__',
@@ -3314,7 +4041,9 @@ class _Sidebar extends StatelessWidget {
       ),
       _ToolIcon(
         icon: Icons.delete_outline,
-        label: 'Trash current canvas',
+        label: mode == CanvasMode.screen
+            ? 'Trash current canvas'
+            : 'Trash current slide',
         onPressed: onClear,
         compact: true,
       ),

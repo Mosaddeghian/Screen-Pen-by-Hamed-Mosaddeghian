@@ -1,5 +1,11 @@
 ﻿# Changelog
 
+## [1.6.0] - 2026-09-16
+### Added
+- Endless whiteboard and blackboard with separate slides. Drag with the Hand tool, hold Space/Control/Alt, or use the middle mouse button to move in any direction. Drag far right/down for the next slide, left/up for the previous one.
+- Slide bar with numbered titles. Tap a name to jump, double-tap or tap the pencil to rename, plus buttons for previous, next, and adding slides.
+- Settings choice for the move key (Space, Control, or Alt).
+
 ## [1.5.1] - 2026-09-07
 ### Changed
 - Keep the normal arrow pointer visible and show the selected tool icon beside it so the arrow tip marks the exact draw point.
