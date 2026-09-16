@@ -151,20 +151,21 @@ void main() {
 
     test('slide step follows drag direction and threshold', () {
       const viewport = Size(1000, 800);
-      expect(
-        slideStepForPan(const Offset(500, 0), viewport),
-        BoardSlideStep.next,
-      );
-      expect(
-        slideStepForPan(const Offset(0, 400), viewport),
-        BoardSlideStep.next,
-      );
+      // Drag left pulls the right tile in -> next. Drag right -> previous.
       expect(
         slideStepForPan(const Offset(-500, 0), viewport),
-        BoardSlideStep.previous,
+        BoardSlideStep.next,
       );
       expect(
         slideStepForPan(const Offset(0, -400), viewport),
+        BoardSlideStep.next,
+      );
+      expect(
+        slideStepForPan(const Offset(500, 0), viewport),
+        BoardSlideStep.previous,
+      );
+      expect(
+        slideStepForPan(const Offset(0, 400), viewport),
         BoardSlideStep.previous,
       );
       expect(
@@ -175,6 +176,59 @@ void main() {
         slideStepForPan(Offset.zero, const Size(0, 0)),
         BoardSlideStep.stay,
       );
+    });
+
+    test('tile map lays out slides with gaps and finds nearest tile', () {
+      const viewport = Size(1000, 800);
+      final origin = boardSlideOrigin(col: 1, row: 0, viewport: viewport);
+      expect(origin.dx, viewport.width + kBoardSlideGap);
+      expect(origin.dy, 0);
+
+      final down = boardSlideOrigin(col: 0, row: 1, viewport: viewport);
+      expect(down.dx, 0);
+      expect(down.dy, viewport.height + kBoardSlideGap);
+
+      // Centered on start tile.
+      expect(
+        boardCellForCamera(Offset.zero, viewport),
+        (col: 0, row: 0),
+      );
+      // Dragged left by one tile + gap: nearest is the right tile.
+      expect(
+        boardCellForCamera(
+          Offset(-(viewport.width + kBoardSlideGap), 0),
+          viewport,
+        ),
+        (col: 1, row: 0),
+      );
+      // Dragged up by one tile + gap: nearest is the tile below.
+      expect(
+        boardCellForCamera(
+          Offset(0, -(viewport.height + kBoardSlideGap)),
+          viewport,
+        ),
+        (col: 0, row: 1),
+      );
+      // Snapping centers exactly on the tile.
+      final slide = BoardSlide(id: 's', title: '2', col: 1, row: 0);
+      expect(cameraForSlide(slide, viewport), -origin);
+    });
+
+    test('tiles are found by grid spot and keep grid in JSON', () {
+      final slides = [
+        BoardSlide(id: 'a', title: '1', col: 0, row: 0),
+        BoardSlide(id: 'b', title: '2', col: 1, row: 0),
+      ];
+      expect(slideAt(slides, 1, 0)?.id, 'b');
+      expect(slideAt(slides, 0, 1), isNull);
+
+      final restored = BoardSlide.fromJson(slides[1].toJson());
+      expect(restored.col, 1);
+      expect(restored.row, 0);
+      // Old saves without grid spots load at the start without crashing.
+      final legacy = BoardSlide.fromJson({'id': 'old', 'title': '1'});
+      expect(legacy.col, 0);
+      expect(legacy.row, 0);
     });
 
     test('slides round-trip through JSON with drawings', () {
@@ -1090,15 +1144,47 @@ void main() {
     expect(find.byKey(const ValueKey('slide-chip-0')), findsOneWidget);
     expect(find.byKey(const ValueKey('slide-chip-1')), findsNothing);
 
-    // Far right drag = next slide (new slide created endlessly).
+    // Far left drag pulls the right tile in = next (created endlessly).
     await tester.timedDragFrom(
-      const Offset(400, 400),
-      const Offset(700, 20),
+      const Offset(700, 400),
+      const Offset(-900, 20),
       const Duration(milliseconds: 200),
     );
     await tester.pumpAndSettle();
 
     expect(find.byKey(const ValueKey('slide-chip-1')), findsOneWidget);
+  });
+
+  testWidgets('vertical drag creates a tile below and arrows move', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(const PenApp());
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Whiteboard'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('tool-hand')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('slide-up')), findsOneWidget);
+    expect(find.byKey(const ValueKey('slide-down')), findsOneWidget);
+
+    // Far up drag pulls the tile below in.
+    await tester.timedDragFrom(
+      const Offset(600, 600),
+      const Offset(20, -700),
+      const Duration(milliseconds: 200),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('slide-chip-1')), findsOneWidget);
+
+    // Arrow buttons still move on the map without losing tiles.
+    await tester.tap(find.byKey(const ValueKey('slide-up')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('slide-bar')), findsOneWidget);
   });
 
   testWidgets('slide add button creates another numbered slide', (

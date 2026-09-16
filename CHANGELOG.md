@@ -1,5 +1,13 @@
 ﻿# Changelog
 
+## [1.7.0] - 2026-09-16
+### Fixed
+- Drag direction now feels natural: drag left to pull in the tile on the right, drag up to pull in the tile below. The old backwards mapping is fixed.
+### Added
+- Endless tile map in all four directions. Whiteboard and blackboard tiles have column/row spots with gaps, so you can stop between tiles while roaming.
+- Numbered tile frames with borders. Tapping a number jumps exactly onto that tile and shows only inside its borders; dragging shows everything including gaps and overflow ink.
+- Slide bar arrows for left, right, up, and down plus arrow-key and PageUp/PageDown map movement.
+
 ## [1.6.0] - 2026-09-16
 ### Added
 - Endless whiteboard and blackboard with separate slides. Drag with the Hand tool, hold Space/Control/Alt, or use the middle mouse button to move in any direction. Drag far right/down for the next slide, left/up for the previous one.

@@ -17,7 +17,7 @@ import 'package:window_manager/window_manager.dart';
 const MethodChannel _nativeChannel = MethodChannel('pen/native');
 
 /// Shown in Settings. Keep in sync with `pubspec.yaml` and `CHANGELOG.md`.
-const kAppVersion = '1.6.0';
+const kAppVersion = '1.7.0';
 
 const int _vkShift = 0x10;
 const int _shiftKeyDownBit = 0x8000;
@@ -608,6 +608,9 @@ const String kHandSlotId = '__hand__';
 /// How far (share of screen width/height) you must drag to change slide.
 const double kSlidePanFraction = 0.4;
 
+/// Empty space between two slide tiles on the endless board map.
+const double kBoardSlideGap = 72;
+
 /// Key you can hold to move the board while a drawing tool is still selected.
 enum BoardPanKey { space, control, alt }
 
@@ -640,8 +643,9 @@ String newBoardSlideId() =>
 /// Which way a finished drag wants to go.
 enum BoardSlideStep { previous, stay, next }
 
-/// Drag right/down far enough -> next. Drag left/up far enough -> previous.
-/// Otherwise stay. Used by whiteboard/blackboard slide switching.
+/// Drag left/up far enough -> next (the tile on the right / below slides in).
+/// Drag right/down far enough -> previous. Otherwise stay.
+/// The content follows the pointer, like pulling paper toward you.
 BoardSlideStep slideStepForPan(
   Offset pan,
   Size viewport, {
@@ -652,13 +656,49 @@ BoardSlideStep slideStepForPan(
   }
   final thresholdX = viewport.width * fraction;
   final thresholdY = viewport.height * fraction;
-  if (pan.dx >= thresholdX || pan.dy >= thresholdY) {
+  if (pan.dx <= -thresholdX || pan.dy <= -thresholdY) {
     return BoardSlideStep.next;
   }
-  if (pan.dx <= -thresholdX || pan.dy <= -thresholdY) {
+  if (pan.dx >= thresholdX || pan.dy >= thresholdY) {
     return BoardSlideStep.previous;
   }
   return BoardSlideStep.stay;
+}
+
+/// Top-left corner of a slide tile in endless board coordinates.
+Offset boardSlideOrigin({
+  required int col,
+  required int row,
+  required Size viewport,
+  double gap = kBoardSlideGap,
+}) {
+  return Offset(col * (viewport.width + gap), row * (viewport.height + gap));
+}
+
+/// Which tile is closest to the middle of the screen for a free camera.
+/// Lets the view stop between tiles instead of snapping every time.
+({int col, int row}) boardCellForCamera(
+  Offset camera,
+  Size viewport, {
+  double gap = kBoardSlideGap,
+}) {
+  if (viewport.width <= 0 || viewport.height <= 0) {
+    return (col: 0, row: 0);
+  }
+  final boardCenter =
+      Offset(viewport.width / 2, viewport.height / 2) - camera;
+  final col =
+      ((boardCenter.dx - viewport.width / 2) / (viewport.width + gap)).round();
+  final row =
+      ((boardCenter.dy - viewport.height / 2) / (viewport.height + gap))
+          .round();
+  return (col: col, row: row);
+}
+
+/// Camera that centers exactly on [slide] for the given screen size.
+/// Tapping a slide number uses this; dragging leaves the camera free.
+Offset cameraForSlide(BoardSlide slide, Size viewport) {
+  return -boardSlideOrigin(col: slide.col, row: slide.row, viewport: viewport);
 }
 
 int indexOfBoardSlide(List<BoardSlide> slides, String? id) {
@@ -667,18 +707,30 @@ int indexOfBoardSlide(List<BoardSlide> slides, String? id) {
   return index < 0 ? 0 : index;
 }
 
-/// One page on an endless board. Each slide keeps its own drawings.
+/// One tile on the endless board map. Each slide keeps its own drawings
+/// in its own local coordinates (0,0 is the slide's top-left).
+/// [col] grows to the right, [row] grows downward. Negative values allow
+/// endlesstiles to the left and above the start.
 class BoardSlide {
-  BoardSlide({required this.id, required this.title, List<Drawable>? drawables})
-    : drawables = drawables ?? <Drawable>[];
+  BoardSlide({
+    required this.id,
+    required this.title,
+    List<Drawable>? drawables,
+    this.col = 0,
+    this.row = 0,
+  }) : drawables = drawables ?? <Drawable>[];
 
   final String id;
   String title;
   final List<Drawable> drawables;
+  int col;
+  int row;
 
   Map<String, dynamic> toJson() => {
     'id': id,
     'title': title,
+    'col': col,
+    'row': row,
     'drawables': drawables.map((item) => item.toJson()).toList(),
   };
 
@@ -701,9 +753,19 @@ class BoardSlide {
       title: (rawTitle == null || rawTitle.trim().isEmpty)
           ? '1'
           : rawTitle.trim(),
+      col: (json['col'] as num?)?.toInt() ?? 0,
+      row: (json['row'] as num?)?.toInt() ?? 0,
       drawables: drawables,
     );
   }
+}
+
+/// Find the tile at a grid spot, or null when that spot is still empty.
+BoardSlide? slideAt(List<BoardSlide> slides, int col, int row) {
+  for (final slide in slides) {
+    if (slide.col == col && slide.row == row) return slide;
+  }
+  return null;
 }
 
 class PenApp extends StatelessWidget {
@@ -748,10 +810,10 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
   };
   final _boardSlides = <CanvasMode, List<BoardSlide>>{
     CanvasMode.whiteboard: [
-      BoardSlide(id: 'slide-whiteboard-1', title: '1'),
+      BoardSlide(id: 'slide-whiteboard-1', title: '1', col: 0, row: 0),
     ],
     CanvasMode.blackboard: [
-      BoardSlide(id: 'slide-blackboard-1', title: '1'),
+      BoardSlide(id: 'slide-blackboard-1', title: '1', col: 0, row: 0),
     ],
   };
   final _activeSlideId = <CanvasMode, String?>{
@@ -760,6 +822,12 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
   };
   final _boardPan = <CanvasMode, Offset>{
     for (final mode in CanvasMode.values) mode: Offset.zero,
+  };
+  // True = snapped exactly onto the active slide (clipped view showing only
+  // inside its borders). False = free roaming camera that may sit between
+  // tiles and shows everything including gaps.
+  final _boardFocused = <CanvasMode, bool>{
+    for (final mode in CanvasMode.values) mode: true,
   };
   final _slideUndo = <String, List<List<Drawable>>>{};
   BoardPanKey _panKey = BoardPanKey.space;
@@ -862,6 +930,7 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
   bool _magnifierCaptureInFlight = false;
   bool _draggingToolbar = false;
   bool _eraserGestureChanged = false;
+  final _eraserPushedSlides = <String>{};
   bool _shiftPressed = false;
   bool _shuttingDown = false;
   bool _hitTestSyncScheduled = false;
@@ -899,6 +968,8 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
       final created = BoardSlide(
         id: newBoardSlideId(),
         title: defaultSlideTitle(0),
+        col: 0,
+        row: 0,
       );
       slides.add(created);
       _activeSlideId[_mode] = created.id;
@@ -913,6 +984,41 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
   }
 
   Offset get _activePan => _boardPan[_mode] ?? Offset.zero;
+
+  bool get _isBoardFocused => _boardFocused[_mode] ?? true;
+
+  Size get _viewportSize =>
+      MediaQuery.maybeOf(context)?.size ?? const Size(1180, 760);
+
+  /// Camera to use for painting. Focused = recomputed snap (safe on resize).
+  /// Roaming = stored free camera that may sit between tiles.
+  Offset _cameraForPaint() {
+    if (!_isBoardMode) return Offset.zero;
+    if (_isBoardFocused) {
+      return cameraForSlide(_ensureActiveSlide(), _viewportSize);
+    }
+    return _activePan;
+  }
+
+  Offset _activeSlideOrigin() {
+    final slide = _ensureActiveSlide();
+    return boardSlideOrigin(
+      col: slide.col,
+      row: slide.row,
+      viewport: _viewportSize,
+    );
+  }
+
+  /// Screen touch -> drawing position inside the active slide.
+  /// In focused view this is unchanged; between tiles it can be outside
+  /// 0..viewport (overflow shown while roaming, hidden when focused).
+  Offset _screenToActiveLocal(Offset screen) {
+    if (!_isBoardMode) return screen;
+    final camera = _isBoardFocused
+        ? cameraForSlide(_ensureActiveSlide(), _viewportSize)
+        : _activePan;
+    return screen - camera - _activeSlideOrigin();
+  }
 
   /// Desktop click-through when idle, pointer, or magnifier is active (toolbar
   /// still hit-tests), or when the toolbar is collapsed.
@@ -1317,6 +1423,26 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
             slides[i].title = defaultSlideTitle(i);
           }
         }
+        // Old saves had no grid spots: every slide loaded at 0,0 and would
+        // overlap. Spread them into row 0 so each tile stays visible.
+        final seen = <String>{};
+        var needsSpread = false;
+        for (final slide in slides) {
+          final key = '${slide.col},${slide.row}';
+          if (!seen.add(key)) {
+            needsSpread = true;
+            break;
+          }
+        }
+        if (needsSpread) {
+          for (var i = 0; i < slides.length; i++) {
+            slides[i].col = i;
+            slides[i].row = 0;
+          }
+        }
+        // Always restart focused on the saved active tile (clipped view).
+        _boardFocused[mode] = true;
+        _boardPan[mode] = Offset.zero;
       }
       final panName = prefs.getString('board_pan_key');
       if (panName != null) {
@@ -1834,6 +1960,12 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
     if (stack.length > 50) stack.removeAt(0);
   }
 
+  void _pushUndoFor(BoardSlide slide) {
+    final stack = _slideUndo.putIfAbsent(slide.id, () => <List<Drawable>>[]);
+    stack.add(List<Drawable>.from(slide.drawables));
+    if (stack.length > 50) stack.removeAt(0);
+  }
+
   void _undoLast() {
     final stack = _undoStackForActive();
     if (stack.isEmpty) return;
@@ -1866,7 +1998,12 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
       _mode = mode;
       _paletteOpen = false;
       _isPanningBoard = false;
-      _boardPan[mode] = Offset.zero;
+      if (mode != CanvasMode.screen) {
+        _ensureActiveSlide();
+        _boardFocused[mode] = true;
+        // Snap after the new size is known; paint uses recomputed snap.
+        _boardPan[mode] = Offset.zero;
+      }
     });
     unawaited(_fitOverlayToCurrentDisplay());
     _scheduleSave();
@@ -1890,11 +2027,30 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
     if (mode == CanvasMode.screen) return const <BoardSlide>[];
     final slides = _boardSlides[mode]!;
     if (slides.isEmpty) {
-      final created = BoardSlide(id: newBoardSlideId(), title: '1');
+      final created = BoardSlide(
+        id: newBoardSlideId(),
+        title: '1',
+        col: 0,
+        row: 0,
+      );
       slides.add(created);
       _activeSlideId[mode] = created.id;
     }
     return slides;
+  }
+
+  BoardSlide _ensureSlideAt(int col, int row) {
+    final slides = _slidesFor(_mode);
+    final existing = slideAt(slides, col, row);
+    if (existing != null) return existing;
+    final created = BoardSlide(
+      id: newBoardSlideId(),
+      title: defaultSlideTitle(slides.length),
+      col: col,
+      row: row,
+    );
+    slides.add(created);
+    return created;
   }
 
   void _selectSlide(String id) {
@@ -1903,7 +2059,8 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
     _commitPendingCandle();
     setState(() {
       _activeSlideId[_mode] = id;
-      _boardPan[_mode] = Offset.zero;
+      _boardFocused[_mode] = true;
+      _boardPan[_mode] = cameraForSlide(_ensureActiveSlide(), _viewportSize);
       _isPanningBoard = false;
       _draftStart = null;
       _draftEnd = null;
@@ -1917,40 +2074,34 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
     if (_editingText) _commitInlineText();
     _commitPendingCandle();
     final slides = _slidesFor(_mode);
+    final active = _ensureActiveSlide();
+    // New slide goes to the first empty tile to the right of the active one.
+    var col = active.col + 1;
+    while (slideAt(slides, col, active.row) != null) {
+      col++;
+    }
     final created = BoardSlide(
       id: newBoardSlideId(),
       title: defaultSlideTitle(slides.length),
+      col: col,
+      row: active.row,
     );
     setState(() {
       slides.add(created);
       _activeSlideId[_mode] = created.id;
-      _boardPan[_mode] = Offset.zero;
+      _boardFocused[_mode] = true;
+      _boardPan[_mode] = cameraForSlide(created, _viewportSize);
     });
     _scheduleSave();
   }
 
-  void _stepSlide(BoardSlideStep step) {
+  /// Move on the tile map. Endless in all four directions: missing tiles
+  /// are created so you can keep going right, left, up, or down.
+  void _stepSlideBy(int dCol, int dRow) {
     if (!_isBoardMode) return;
-    final slides = _slidesFor(_mode);
-    var index = indexOfBoardSlide(slides, _activeSlideId[_mode]);
-    if (step == BoardSlideStep.next) {
-      index++;
-      if (index >= slides.length) {
-        slides.add(
-          BoardSlide(id: newBoardSlideId(), title: defaultSlideTitle(index)),
-        );
-      }
-      _selectSlide(slides[index].id);
-    } else if (step == BoardSlideStep.previous) {
-      if (index <= 0) {
-        // First slide has nowhere to go back to: stay and reset the drag.
-        setState(() => _boardPan[_mode] = Offset.zero);
-        return;
-      }
-      _selectSlide(slides[index - 1].id);
-    } else {
-      setState(() => _boardPan[_mode] = Offset.zero);
-    }
+    final active = _ensureActiveSlide();
+    final target = _ensureSlideAt(active.col + dCol, active.row + dRow);
+    _selectSlide(target.id);
   }
 
   void _commitBoardPan() {
@@ -1958,11 +2109,21 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
       _isPanningBoard = false;
       return;
     }
-    final pan = _activePan;
-    final size = MediaQuery.maybeOf(context)?.size ?? const Size(1180, 760);
-    final step = slideStepForPan(pan, size);
+    // Free camera: stay exactly where the drag left the view so you can sit
+    // between tiles. Only update which tile is active (nearest to center),
+    // creating it when the map is still empty there.
+    final size = _viewportSize;
+    final cell = boardCellForCamera(_activePan, size);
+    final target = _ensureSlideAt(cell.col, cell.row);
     _isPanningBoard = false;
-    _stepSlide(step);
+    setState(() {
+      _activeSlideId[_mode] = target.id;
+      _boardFocused[_mode] = false;
+      _draftStart = null;
+      _draftEnd = null;
+      _draftPoints = <Offset>[];
+    });
+    _scheduleSave();
   }
 
   Future<void> _renameSlide(BoardSlide slide) async {
@@ -2229,9 +2390,11 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
       _keyboardFocus.requestFocus();
       _isPanningBoard = true;
       _panStartLocal = details.localPosition;
-      _panBase = _activePan;
+      _panBase = _isBoardMode ? _cameraForPaint() : Offset.zero;
       _pointerPosition = details.localPosition;
-      setState(() {});
+      setState(() {
+        if (_isBoardMode) _boardFocused[_mode] = false;
+      });
       return;
     }
     if (!_hasDrawingTool) return;
@@ -2240,16 +2403,20 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
     _pointerPosition = details.localPosition;
     if (_isEraserSelected) {
       _eraserGestureChanged = false;
+      _eraserPushedSlides.clear();
       _eraseAt(details.localPosition, grouped: true);
       return;
     }
     if (_activeSlot.type == ToolType.text) {
       return;
     }
+    final local = _isBoardMode
+        ? _screenToActiveLocal(details.localPosition)
+        : details.localPosition;
     setState(() {
-      _draftStart = details.localPosition;
-      _draftEnd = details.localPosition;
-      _draftPoints = <Offset>[details.localPosition];
+      _draftStart = local;
+      _draftEnd = local;
+      _draftPoints = <Offset>[local];
     });
     if (_activeSlot.type == ToolType.line) _startShiftPoll();
   }
@@ -2261,6 +2428,7 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
         _pointerPosition = details.localPosition;
         setState(() {
           _boardPan[_mode] = _panBase + (details.localPosition - start);
+          if (_isBoardMode) _boardFocused[_mode] = false;
         });
       }
       return;
@@ -2269,10 +2437,11 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
       // Pan-key pressed mid-gesture: switch from drawing to moving.
       _isPanningBoard = true;
       _panStartLocal = details.localPosition;
-      _panBase = _activePan;
+      _panBase = _isBoardMode ? _cameraForPaint() : Offset.zero;
       _pointerPosition = details.localPosition;
       _stopShiftPoll();
       setState(() {
+        if (_isBoardMode) _boardFocused[_mode] = false;
         _draftStart = null;
         _draftEnd = null;
         _draftPoints = <Offset>[];
@@ -2286,13 +2455,16 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
       return;
     }
     if (_draftStart == null) return;
+    final local = _isBoardMode
+        ? _screenToActiveLocal(details.localPosition)
+        : details.localPosition;
     final shiftPressed = isShiftHeld();
     setState(() {
       _shiftPressed = shiftPressed;
-      _draftEnd = details.localPosition;
+      _draftEnd = local;
       if (_activeSlot.type == ToolType.pen ||
           _activeSlot.type == ToolType.highlighter) {
-        _draftPoints.add(details.localPosition);
+        _draftPoints.add(local);
       }
     });
   }
@@ -2301,10 +2473,18 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
     _stopShiftPoll();
     if (_isPanningBoard) {
       _middlePanArmed = false;
+      final reverted = _panBase;
       setState(() {
-        _boardPan[_mode] = Offset.zero;
+        _boardPan[_mode] = reverted;
         _isPanningBoard = false;
         _panStartLocal = null;
+        if (_isBoardMode) {
+          final snapped = cameraForSlide(
+            _ensureActiveSlide(),
+            _viewportSize,
+          );
+          _boardFocused[_mode] = (reverted - snapped).distance < 0.5;
+        }
       });
       return;
     }
@@ -2332,6 +2512,7 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
     if (_isEraserSelected) {
       if (_eraserGestureChanged) _scheduleSave();
       _eraserGestureChanged = false;
+      _eraserPushedSlides.clear();
       return;
     }
     if (_draftStart == null) return;
@@ -2440,6 +2621,9 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
     if (_isHandSelected) return;
     if (!_hasDrawingTool) return;
     _pointerPosition = details.localPosition;
+    final local = _isBoardMode
+        ? _screenToActiveLocal(details.localPosition)
+        : details.localPosition;
     if (_isEraserSelected) {
       _eraseAt(details.localPosition);
     } else if (_activeSlot.type == ToolType.text) {
@@ -2450,7 +2634,7 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
         setState(
           () => _activeDrawables.add(
             TextDrawable(
-              details.localPosition,
+              local,
               preset,
               _activeSlot.drawingColor,
               _activeSlot.fontSize,
@@ -2469,7 +2653,7 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
         setState(
           () => _activeDrawables.add(
             _candleGroupFromSpecs(
-              [defaultCandleAt(details.localPosition, _activeSlot.thickness)],
+              [defaultCandleAt(local, _activeSlot.thickness)],
               _activeSlot.thickness,
               _activeSlot.color,
             ),
@@ -2483,7 +2667,7 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
       setState(
         () => _activeDrawables.add(
           StrokeDrawable(
-            <Offset>[details.localPosition],
+            <Offset>[local],
             _activeSlot.drawingColor,
             _activeSlot.thickness,
           ),
@@ -2515,10 +2699,11 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
       _textOrigin = null;
     });
     if (origin == null || slot == null || text.trim().isEmpty) return;
+    final local = _isBoardMode ? _screenToActiveLocal(origin) : origin;
     _pushUndo();
     setState(
       () => _activeDrawables.add(
-        TextDrawable(origin, text.trim(), slot.drawingColor, slot.fontSize),
+        TextDrawable(local, text.trim(), slot.drawingColor, slot.fontSize),
       ),
     );
     _scheduleSave();
@@ -2533,17 +2718,49 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
     });
   }
 
-  void _eraseAt(Offset point, {bool grouped = false}) {
-    for (var i = _activeDrawables.length - 1; i >= 0; i--) {
-      if (_hitTest(_activeDrawables[i], point)) {
-        if (!grouped || !_eraserGestureChanged) _pushUndo();
-        setState(() => _activeDrawables.removeAt(i));
-        if (grouped) {
-          _eraserGestureChanged = true;
-        } else {
-          _scheduleSave();
+  void _eraseAt(Offset screenPoint, {bool grouped = false}) {
+    if (_mode == CanvasMode.screen) {
+      for (var i = _activeDrawables.length - 1; i >= 0; i--) {
+        if (_hitTest(_activeDrawables[i], screenPoint)) {
+          if (!grouped || !_eraserGestureChanged) _pushUndo();
+          setState(() => _activeDrawables.removeAt(i));
+          if (grouped) {
+            _eraserGestureChanged = true;
+          } else {
+            _scheduleSave();
+          }
+          return;
         }
-        return;
+      }
+      return;
+    }
+    // Board mode: erase whatever tile is under the pointer, even while
+    // roaming between tiles. Each tile keeps its own undo history.
+    final size = _viewportSize;
+    final camera = _isBoardFocused
+        ? cameraForSlide(_ensureActiveSlide(), size)
+        : _activePan;
+    final slides = _slidesFor(_mode);
+    for (final slide in slides) {
+      final origin = boardSlideOrigin(
+        col: slide.col,
+        row: slide.row,
+        viewport: size,
+      );
+      final local = screenPoint - camera - origin;
+      for (var i = slide.drawables.length - 1; i >= 0; i--) {
+        if (_hitTest(slide.drawables[i], local)) {
+          final needsPush =
+              !grouped || _eraserPushedSlides.add(slide.id);
+          if (needsPush) _pushUndoFor(slide);
+          setState(() => slide.drawables.removeAt(i));
+          if (grouped) {
+            _eraserGestureChanged = true;
+          } else {
+            _scheduleSave();
+          }
+          return;
+        }
       }
     }
   }
@@ -2982,9 +3199,18 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
         event.logicalKey == LogicalKeyboardKey.escape) {
       _commitPendingCandle();
       if (_isPanningBoard) {
+        final reverted = _panBase;
         setState(() {
-          _boardPan[_mode] = Offset.zero;
+          _boardPan[_mode] = reverted;
           _isPanningBoard = false;
+          _panStartLocal = null;
+          if (_isBoardMode) {
+            final snapped = cameraForSlide(
+              _ensureActiveSlide(),
+              _viewportSize,
+            );
+            _boardFocused[_mode] = (reverted - snapped).distance < 0.5;
+          }
         });
       }
       return;
@@ -3012,19 +3238,21 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
       }
       return;
     }
-    // Endless board shortcuts (no Ctrl+Shift needed).
+    // Endless tile map shortcuts (no Ctrl+Shift needed).
     if (!_isBoardMode) return;
     final noModifiers =
         !HardwareKeyboard.instance.isControlPressed &&
         !HardwareKeyboard.instance.isAltPressed;
-    if (event.logicalKey == LogicalKeyboardKey.pageDown ||
-        event.logicalKey == LogicalKeyboardKey.arrowDown ||
-        event.logicalKey == LogicalKeyboardKey.arrowRight) {
-      _stepSlide(BoardSlideStep.next);
-    } else if (event.logicalKey == LogicalKeyboardKey.pageUp ||
-        event.logicalKey == LogicalKeyboardKey.arrowUp ||
-        event.logicalKey == LogicalKeyboardKey.arrowLeft) {
-      _stepSlide(BoardSlideStep.previous);
+    if (event.logicalKey == LogicalKeyboardKey.arrowRight) {
+      _stepSlideBy(1, 0);
+    } else if (event.logicalKey == LogicalKeyboardKey.arrowLeft) {
+      _stepSlideBy(-1, 0);
+    } else if (event.logicalKey == LogicalKeyboardKey.arrowDown ||
+        event.logicalKey == LogicalKeyboardKey.pageDown) {
+      _stepSlideBy(0, 1);
+    } else if (event.logicalKey == LogicalKeyboardKey.arrowUp ||
+        event.logicalKey == LogicalKeyboardKey.pageUp) {
+      _stepSlideBy(0, -1);
     } else if (noModifiers && event.logicalKey == LogicalKeyboardKey.keyH) {
       _selectHand();
     }
@@ -3177,6 +3405,17 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
                                   : null,
                               magnifierLensSize: _magnifierSize.lensSize,
                               panOffset: _isBoardMode ? _activePan : Offset.zero,
+                              boardSlides: _isBoardMode
+                                  ? _activeSlides
+                                  : null,
+                              activeBoardSlideId: _isBoardMode
+                                  ? _activeSlideId[_mode]
+                                  : null,
+                              boardCamera: _isBoardMode
+                                  ? _cameraForPaint()
+                                  : Offset.zero,
+                              boardFocused: _isBoardFocused,
+                              boardGap: kBoardSlideGap,
                             ),
                             child: const SizedBox.expand(),
                           ),
@@ -3307,9 +3546,10 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
                         activeId: _activeSlideId[_mode],
                         onSelect: _selectSlide,
                         onAdd: _addSlide,
-                        onPrevious: () =>
-                            _stepSlide(BoardSlideStep.previous),
-                        onNext: () => _stepSlide(BoardSlideStep.next),
+                        onPrevious: () => _stepSlideBy(-1, 0),
+                        onNext: () => _stepSlideBy(1, 0),
+                        onUp: () => _stepSlideBy(0, -1),
+                        onDown: () => _stepSlideBy(0, 1),
                         onRename: _renameSlide,
                       ),
                     ),
@@ -3349,6 +3589,11 @@ class AnnotationPainter extends CustomPainter {
     this.magnifierCenter,
     this.magnifierLensSize = const Size(220, 150),
     this.panOffset = Offset.zero,
+    this.boardSlides,
+    this.activeBoardSlideId,
+    this.boardCamera = Offset.zero,
+    this.boardFocused = true,
+    this.boardGap = kBoardSlideGap,
   });
 
   final List<Drawable> drawables;
@@ -3366,17 +3611,236 @@ class AnnotationPainter extends CustomPainter {
   final Size magnifierLensSize;
   final Offset panOffset;
 
+  /// All tiles for endless board map. Null means single canvas (screen mode
+  /// or old tests). When set, tiles are laid out as a grid with gaps.
+  final List<BoardSlide>? boardSlides;
+  final String? activeBoardSlideId;
+
+  /// Free camera (screen = board + camera). Focused view snaps to the active
+  /// tile and clips to its borders; roaming shows all tiles including gaps.
+  final Offset boardCamera;
+  final bool boardFocused;
+  final double boardGap;
+
+  BoardSlide? get _activeBoardSlide {
+    final slides = boardSlides;
+    if (slides == null || slides.isEmpty) return null;
+    for (final slide in slides) {
+      if (slide.id == activeBoardSlideId) return slide;
+    }
+    return slides.first;
+  }
+
   @override
   void paint(Canvas canvas, Size size) {
-    canvas.save();
-    // Endless board drag: shift the whole slide without drawing any border.
-    canvas.translate(panOffset.dx, panOffset.dy);
-    for (final item in drawables) {
-      _paintDrawable(canvas, item);
+    final slides = boardSlides;
+    if (slides != null && slides.isNotEmpty) {
+      _paintBoard(canvas, size, slides);
+    } else {
+      canvas.save();
+      // Single canvas (screen mode): shift without borders.
+      canvas.translate(panOffset.dx, panOffset.dy);
+      for (final item in drawables) {
+        _paintDrawable(canvas, item);
+      }
+      if (pendingCandle != null) {
+        _paintDrawable(canvas, pendingCandle!);
+      }
+      _paintDraft(canvas);
+      canvas.restore();
     }
-    if (pendingCandle != null) {
-      _paintDrawable(canvas, pendingCandle!);
+    if (showPointer && pointerPosition != null) {
+      final halo = Paint()
+        ..color = const Color(0xff35a7ff).withValues(alpha: .22);
+      final ring = Paint()
+        ..color = const Color(0xff35a7ff)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.5;
+      final center = Paint()..color = Colors.white;
+      canvas.drawCircle(pointerPosition!, 20, halo);
+      canvas.drawCircle(pointerPosition!, 20, ring);
+      canvas.drawCircle(pointerPosition!, 3.5, center);
     }
+    if (magnifierImage != null && magnifierCenter != null) {
+      final lens = Rect.fromCenter(
+        center: magnifierCenter!,
+        width: magnifierLensSize.width,
+        height: magnifierLensSize.height,
+      );
+      canvas.save();
+      canvas.clipRRect(RRect.fromRectAndRadius(lens, const Radius.circular(6)));
+      paintImage(
+        canvas: canvas,
+        rect: lens,
+        image: magnifierImage!,
+        fit: BoxFit.fill,
+        filterQuality: FilterQuality.medium,
+      );
+      canvas.restore();
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(lens, const Radius.circular(6)),
+        Paint()
+          ..color = const Color(0xff35a7ff)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2,
+      );
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(lens.inflate(1), const Radius.circular(7)),
+        Paint()
+          ..color = Colors.black45
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1,
+      );
+    }
+    if (toolCursorKind != null && pointerPosition != null) {
+      _paintToolCursor(
+        canvas,
+        pointerPosition!,
+        toolCursorKind!,
+        toolCursorColor,
+      );
+    }
+  }
+
+  void _paintBoard(Canvas canvas, Size size, List<BoardSlide> slides) {
+    final active = _activeBoardSlide;
+    final camera = boardFocused && active != null
+        ? -boardSlideOrigin(
+            col: active.col,
+            row: active.row,
+            viewport: size,
+            gap: boardGap,
+          )
+        : boardCamera;
+    if (boardFocused && active != null) {
+      // Focused (tap a number): show only inside this tile's borders.
+      final origin = boardSlideOrigin(
+        col: active.col,
+        row: active.row,
+        viewport: size,
+        gap: boardGap,
+      );
+      final rect = Rect.fromLTWH(
+        origin.dx + camera.dx,
+        origin.dy + camera.dy,
+        size.width,
+        size.height,
+      );
+      canvas.save();
+      canvas.clipRect(rect);
+      canvas.translate(origin.dx + camera.dx, origin.dy + camera.dy);
+      for (final item in active.drawables) {
+        _paintDrawable(canvas, item);
+      }
+      if (pendingCandle != null) {
+        _paintDrawable(canvas, pendingCandle!);
+      }
+      _paintDraft(canvas);
+      canvas.restore();
+      _paintSlideFrame(canvas, rect, active, isActive: true);
+      return;
+    }
+    // Roaming (dragging between tiles): show everything, even gaps.
+    // No clipping so ink that spills over borders stays visible.
+    for (final slide in slides) {
+      final origin = boardSlideOrigin(
+        col: slide.col,
+        row: slide.row,
+        viewport: size,
+        gap: boardGap,
+      );
+      canvas.save();
+      canvas.translate(origin.dx + camera.dx, origin.dy + camera.dy);
+      for (final item in slide.drawables) {
+        _paintDrawable(canvas, item);
+      }
+      if (slide.id == active?.id && pendingCandle != null) {
+        _paintDrawable(canvas, pendingCandle!);
+      }
+      if (slide.id == active?.id) {
+        _paintDraft(canvas);
+      }
+      canvas.restore();
+    }
+    for (final slide in slides) {
+      final origin = boardSlideOrigin(
+        col: slide.col,
+        row: slide.row,
+        viewport: size,
+        gap: boardGap,
+      );
+      final rect = Rect.fromLTWH(
+        origin.dx + camera.dx,
+        origin.dy + camera.dy,
+        size.width,
+        size.height,
+      );
+      // Skip far off-screen tiles for speed.
+      if (rect.right < -200 ||
+          rect.bottom < -200 ||
+          rect.left > size.width + 200 ||
+          rect.top > size.height + 200) {
+        continue;
+      }
+      _paintSlideFrame(canvas, rect, slide, isActive: slide.id == active?.id);
+    }
+  }
+
+  void _paintSlideFrame(
+    Canvas canvas,
+    Rect rect,
+    BoardSlide slide, {
+    required bool isActive,
+  }) {
+    final border = Paint()
+      ..color = isActive
+          ? const Color(0xff2d8ac7)
+          : const Color(0xff9aa3b2).withValues(alpha: .65)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = isActive ? 3 : 1.5;
+    canvas.drawRect(rect, border);
+    final label = slide.title.isEmpty ? '?' : slide.title;
+    final text = TextPainter(
+      text: TextSpan(
+        text: label,
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 13,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    const padding = 6.0;
+    final pill = RRect.fromRectAndRadius(
+      Rect.fromLTWH(
+        rect.left + 8,
+        rect.top + 8,
+        text.width + padding * 2,
+        text.height + padding,
+      ),
+      const Radius.circular(8),
+    );
+    canvas.drawRRect(
+      pill,
+      Paint()..color = const Color(0xff202735).withValues(alpha: .92),
+    );
+    canvas.drawRRect(
+      pill,
+      Paint()
+        ..color = isActive
+            ? const Color(0xff2d8ac7)
+            : Colors.white24
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.2,
+    );
+    text.paint(
+      canvas,
+      Offset(pill.left + padding, pill.top + padding / 2),
+    );
+  }
+
+  void _paintDraft(Canvas canvas) {
     if (draftStart != null && draftEnd != null) {
       switch (draftSlot.type) {
         case ToolType.pen:
@@ -3455,60 +3919,8 @@ class AnnotationPainter extends CustomPainter {
             );
           }
       }
-    } else if (pendingCandle != null) {
+    } else if (pendingCandle != null && boardSlides == null) {
       _paintDrawable(canvas, pendingCandle!);
-    }
-    canvas.restore();
-    if (showPointer && pointerPosition != null) {
-      final halo = Paint()
-        ..color = const Color(0xff35a7ff).withValues(alpha: .22);
-      final ring = Paint()
-        ..color = const Color(0xff35a7ff)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 2.5;
-      final center = Paint()..color = Colors.white;
-      canvas.drawCircle(pointerPosition!, 20, halo);
-      canvas.drawCircle(pointerPosition!, 20, ring);
-      canvas.drawCircle(pointerPosition!, 3.5, center);
-    }
-    if (magnifierImage != null && magnifierCenter != null) {
-      final lens = Rect.fromCenter(
-        center: magnifierCenter!,
-        width: magnifierLensSize.width,
-        height: magnifierLensSize.height,
-      );
-      canvas.save();
-      canvas.clipRRect(RRect.fromRectAndRadius(lens, const Radius.circular(6)));
-      paintImage(
-        canvas: canvas,
-        rect: lens,
-        image: magnifierImage!,
-        fit: BoxFit.fill,
-        filterQuality: FilterQuality.medium,
-      );
-      canvas.restore();
-      canvas.drawRRect(
-        RRect.fromRectAndRadius(lens, const Radius.circular(6)),
-        Paint()
-          ..color = const Color(0xff35a7ff)
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 2,
-      );
-      canvas.drawRRect(
-        RRect.fromRectAndRadius(lens.inflate(1), const Radius.circular(7)),
-        Paint()
-          ..color = Colors.black45
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 1,
-      );
-    }
-    if (toolCursorKind != null && pointerPosition != null) {
-      _paintToolCursor(
-        canvas,
-        pointerPosition!,
-        toolCursorKind!,
-        toolCursorColor,
-      );
     }
   }
 
@@ -3694,10 +4106,13 @@ class AnnotationPainter extends CustomPainter {
   bool shouldRepaint(covariant AnnotationPainter oldDelegate) => true;
 }
 
-/// Bottom slide picker for endless whiteboard/blackboard.
+/// Bottom slide picker for the endless tile map.
 ///
-/// Shows one chip per slide. Tap a name to jump there.
+/// Shows one chip per tile. Tap a number to jump exactly onto that tile
+/// (clipped view showing only inside its borders).
 /// Double-tap a name (or tap the pencil) to rename it.
+/// Arrows move on the map: left/right/up/down. New tiles are created
+/// endlessly in all four directions.
 class _BoardSlideBar extends StatelessWidget {
   const _BoardSlideBar({
     required this.slides,
@@ -3706,6 +4121,8 @@ class _BoardSlideBar extends StatelessWidget {
     required this.onAdd,
     required this.onPrevious,
     required this.onNext,
+    required this.onUp,
+    required this.onDown,
     required this.onRename,
   });
 
@@ -3715,6 +4132,8 @@ class _BoardSlideBar extends StatelessWidget {
   final VoidCallback onAdd;
   final VoidCallback onPrevious;
   final VoidCallback onNext;
+  final VoidCallback onUp;
+  final VoidCallback onDown;
   final ValueChanged<BoardSlide> onRename;
 
   @override
@@ -3732,11 +4151,27 @@ class _BoardSlideBar extends StatelessWidget {
           children: [
             IconButton(
               key: const ValueKey('slide-prev'),
-              tooltip: 'Previous slide',
+              tooltip: 'Slide left',
               iconSize: 18,
               visualDensity: VisualDensity.compact,
               onPressed: onPrevious,
               icon: const Icon(Icons.chevron_left),
+            ),
+            IconButton(
+              key: const ValueKey('slide-up'),
+              tooltip: 'Slide up',
+              iconSize: 18,
+              visualDensity: VisualDensity.compact,
+              onPressed: onUp,
+              icon: const Icon(Icons.expand_less),
+            ),
+            IconButton(
+              key: const ValueKey('slide-down'),
+              tooltip: 'Slide down',
+              iconSize: 18,
+              visualDensity: VisualDensity.compact,
+              onPressed: onDown,
+              icon: const Icon(Icons.expand_more),
             ),
             Flexible(
               child: SingleChildScrollView(
@@ -3802,7 +4237,7 @@ class _BoardSlideBar extends StatelessWidget {
             ),
             IconButton(
               key: const ValueKey('slide-next'),
-              tooltip: 'Next slide',
+              tooltip: 'Slide right',
               iconSize: 18,
               visualDensity: VisualDensity.compact,
               onPressed: onNext,
