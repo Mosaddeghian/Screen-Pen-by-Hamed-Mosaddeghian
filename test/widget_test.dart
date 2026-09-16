@@ -1203,6 +1203,57 @@ void main() {
 
     expect(find.byKey(const ValueKey('slide-chip-1')), findsOneWidget);
   });
+
+  testWidgets('slide delete removes the slide after confirm', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(const PenApp());
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Whiteboard'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('slide-add')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('slide-chip-1')), findsOneWidget);
+
+    // The new slide is active, so its pencil opens the rename window.
+    // The chip also listens for double-tap, so advance past the
+    // double-tap delay before looking for the dialog.
+    await tester.tap(find.byKey(const ValueKey('slide-rename-1')));
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pumpAndSettle();
+    expect(find.text('Rename slide'), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('slide-delete')));
+    await tester.pumpAndSettle();
+    expect(find.text('Delete slide?'), findsOneWidget);
+
+    await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('slide-chip-1')), findsNothing);
+    expect(find.byKey(const ValueKey('slide-chip-0')), findsOneWidget);
+  });
+
+  testWidgets('last slide offers no delete button', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(const PenApp());
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Whiteboard'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('slide-rename-0')));
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pumpAndSettle();
+    expect(find.text('Rename slide'), findsOneWidget);
+    expect(find.byKey(const ValueKey('slide-delete')), findsNothing);
+
+    await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('slide-chip-0')), findsOneWidget);
+  });
 }
 
 AnnotationPainter _annotationPainter(WidgetTester tester) {

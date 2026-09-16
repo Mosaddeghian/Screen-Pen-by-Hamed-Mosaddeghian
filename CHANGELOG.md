@@ -1,5 +1,9 @@
 ﻿# Changelog
 
+## [1.7.2] - 2026-09-16
+### Added
+- Delete slides from the rename window: open rename (double-tap a slide or tap its pencil), tap the red Delete button, and confirm. The last remaining slide is protected so the board always keeps at least one.
+
 ## [1.7.1] - 2026-09-16
 ### Fixed
 - Bottom slide bar in whiteboard and blackboard stays clickable when clicks pass through to the desktop (no tool, pointer, magnifier, or hidden toolbar), so previous/next no longer falls through to the Windows taskbar.

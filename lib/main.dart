@@ -17,7 +17,7 @@ import 'package:window_manager/window_manager.dart';
 const MethodChannel _nativeChannel = MethodChannel('pen/native');
 
 /// Shown in Settings. Keep in sync with `pubspec.yaml` and `CHANGELOG.md`.
-const kAppVersion = '1.7.1';
+const kAppVersion = '1.7.2';
 
 const int _vkShift = 0x10;
 const int _shiftKeyDownBit = 0x8000;
@@ -2146,38 +2146,54 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
     _scheduleSave();
   }
 
+  /// Delete one slide. The last slide is protected so the board always
+  /// keeps at least one tile. When the active slide goes away, the view
+  /// jumps to the nearest remaining slide.
+  void _deleteSlide(BoardSlide slide) {
+    if (!_isBoardMode) return;
+    final slides = _slidesFor(_mode);
+    if (slides.length <= 1) return;
+    final index = slides.indexWhere((item) => item.id == slide.id);
+    if (index < 0) return;
+    final wasActive = _activeSlideId[_mode] == slide.id;
+    setState(() {
+      slides.removeAt(index);
+      // Drop its undo history with it.
+      _slideUndo.remove(slide.id);
+      if (wasActive) {
+        final next = slides[index < slides.length ? index : slides.length - 1];
+        _activeSlideId[_mode] = next.id;
+        _boardFocused[_mode] = true;
+        _boardPan[_mode] = cameraForSlide(next, _viewportSize);
+        _isPanningBoard = false;
+        _draftStart = null;
+        _draftEnd = null;
+        _draftPoints = <Offset>[];
+      }
+    });
+    _scheduleSave();
+    _scheduleHitTestSync();
+  }
+
   Future<void> _renameSlide(BoardSlide slide) async {
     await _suspendPassThroughForOverlay();
     try {
       if (!mounted) return;
-      final controller = TextEditingController(text: slide.title);
-      final result = await showDialog<String>(
+      // No delete when this is the only slide left.
+      final canDelete = _slidesFor(_mode).length > 1;
+      final choice = await showDialog<_SlideRenameChoice>(
         context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('Rename slide'),
-          content: TextField(
-            key: const ValueKey('slide-rename-field'),
-            controller: controller,
-            autofocus: true,
-            maxLength: 30,
-            decoration: const InputDecoration(hintText: 'Slide name'),
-            onSubmitted: (value) => Navigator.pop(context, value),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(context, controller.text),
-              child: const Text('Save'),
-            ),
-          ],
+        builder: (context) => _SlideRenameDialog(
+          initialTitle: slide.title,
+          canDelete: canDelete,
         ),
       );
-      controller.dispose();
-      if (!mounted || result == null) return;
-      final trimmed = result.trim();
+      if (!mounted || choice == null) return;
+      if (choice.delete) {
+        _deleteSlide(slide);
+        return;
+      }
+      final trimmed = (choice.title ?? '').trim();
       if (trimmed.isEmpty) return;
       setState(() => slide.title = trimmed);
       _scheduleSave();
@@ -4137,6 +4153,106 @@ class AnnotationPainter extends CustomPainter {
 /// Double-tap a name (or tap the pencil) to rename it.
 /// Arrows move on the map: left/right/up/down. New tiles are created
 /// endlessly in all four directions.
+/// What the slide rename window returned: a new title, a confirmed delete
+/// request, or null when the window was dismissed without choosing.
+class _SlideRenameChoice {
+  const _SlideRenameChoice.rename(this.title) : delete = false;
+  const _SlideRenameChoice.delete()
+    : title = null,
+      delete = true;
+
+  final String? title;
+  final bool delete;
+}
+
+/// Rename window for a slide. Owns its text field so the controller lives
+/// exactly as long as the window (disposing it earlier can crash the
+/// window's closing animation). Also hosts the red Delete button with a
+/// confirmation step; hidden when only one slide remains.
+class _SlideRenameDialog extends StatefulWidget {
+  const _SlideRenameDialog({
+    required this.initialTitle,
+    required this.canDelete,
+  });
+
+  final String initialTitle;
+  final bool canDelete;
+
+  @override
+  State<_SlideRenameDialog> createState() => _SlideRenameDialogState();
+}
+
+class _SlideRenameDialogState extends State<_SlideRenameDialog> {
+  late final TextEditingController _controller = TextEditingController(
+    text: widget.initialTitle,
+  );
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _askDelete() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (confirmContext) => AlertDialog(
+        title: const Text('Delete slide?'),
+        content: Text(
+          'Delete "${widget.initialTitle}" and its drawings? This cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(confirmContext, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(confirmContext, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirm == true && mounted) {
+      Navigator.pop(context, const _SlideRenameChoice.delete());
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('Rename slide'),
+    content: TextField(
+      key: const ValueKey('slide-rename-field'),
+      controller: _controller,
+      autofocus: true,
+      maxLength: 30,
+      decoration: const InputDecoration(hintText: 'Slide name'),
+      onSubmitted: (value) =>
+          Navigator.pop(context, _SlideRenameChoice.rename(value)),
+    ),
+    actions: [
+      if (widget.canDelete)
+        TextButton(
+          key: const ValueKey('slide-delete'),
+          style: TextButton.styleFrom(foregroundColor: Colors.red),
+          onPressed: _askDelete,
+          child: const Text('Delete'),
+        ),
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(
+        onPressed: () => Navigator.pop(
+          context,
+          _SlideRenameChoice.rename(_controller.text),
+        ),
+        child: const Text('Save'),
+      ),
+    ],
+  );
+}
+
 class _BoardSlideBar extends StatelessWidget {
   const _BoardSlideBar({
     required this.slides,
