@@ -6,7 +6,7 @@
 - Preset note phrases: when you add a text tool you can type a phrase to place, and it lands on the canvas with a single tap. Every text tool also has a pencil button in Settings to edit its phrase later.
 - Reorder tools: Settings ▸ Tool slots now has move-up and move-down arrows on every tool, so you decide the order they appear in the toolbar.
 - Hide tools: Settings ▸ Visible tools lets you switch off Pointer, Hand, Eraser, Magnifier and Select. Hidden tools disappear from the toolbar until you switch them back on, and a hidden tool is never left active.
-- Right-click a tool in the toolbar to open its options menu (colour, thickness, text size, fill, edit phrase, hide) without changing the tool you are currently using.
+- Right-click a tool in the toolbar to open its options menu (colour, thickness, text size, fill, edit phrase, hide) without changing the tool you are currently using. Pointer, Hand, Eraser, Magnifier and Select get a smaller menu with just "Hide from toolbar".
 
 ## [1.7.2] - 2026-09-16
 ### Added

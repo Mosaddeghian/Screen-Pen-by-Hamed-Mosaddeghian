@@ -1433,6 +1433,33 @@ void main() {
     expect(_toolSelected(tester, 'pen-a'), isFalse);
   });
 
+  testWidgets('right-click on a mode tool only offers hiding', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(const PenApp());
+    await tester.pumpAndSettle();
+
+    expect(find.byTooltip('Magnifier'), findsOneWidget);
+
+    final icon = tester.getCenter(find.byTooltip('Magnifier'));
+    final menu = await tester.startGesture(
+      icon,
+      kind: PointerDeviceKind.mouse,
+      buttons: kSecondaryMouseButton,
+    );
+    await menu.up();
+    await tester.pumpAndSettle();
+
+    expect(find.text('Magnifier'), findsOneWidget);
+    expect(find.text('Hide from toolbar'), findsOneWidget);
+
+    await tester.tap(find.text('Hide from toolbar'));
+    await tester.pumpAndSettle();
+
+    expect(find.byTooltip('Magnifier'), findsNothing);
+    expect(find.text('Hide from toolbar'), findsNothing);
+  });
+
   testWidgets('settings reorders tools with move up and move down', (
     tester,
   ) async {

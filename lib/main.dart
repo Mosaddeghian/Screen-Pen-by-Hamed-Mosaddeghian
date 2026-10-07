@@ -4070,8 +4070,9 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
 
   /// Right-click on a tool: a small menu with that tool's own attributes
   /// (color, thickness, phrase, and so on). The active tool never changes,
-  /// so a right-click can't interrupt what you are drawing with.
-  Future<void> _showToolMenu(ToolSlot slot, Offset globalPosition) async {
+  /// so a right-click can't interrupt what you are drawing with. Mode tools
+  /// (pointer, hand, and friends) only get the hide action.
+  Future<void> _showToolMenu(String toolId, Offset globalPosition) async {
     await _suspendPassThroughForOverlay();
     try {
       if (!mounted) return;
@@ -4084,14 +4085,32 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
           math.max(0, size.width - globalPosition.dx),
           math.max(0, size.height - globalPosition.dy),
         ),
-        items: _toolMenuItems(slot),
+        items: _toolMenuEntries(toolId),
       );
       if (result == null || !mounted) return;
-      await result.run(this, slot);
+      await result.run(this);
     } finally {
       await _resumePassThroughAfterOverlay();
       _scheduleHitTestSync();
     }
+  }
+
+  ToolSlot? _slotById(String id) {
+    for (final slot in _slots) {
+      if (slot.id == id) return slot;
+    }
+    return null;
+  }
+
+  /// Hide any tool by id, whether it is a saved slot or a built-in mode.
+  void _setToolHidden(String id, bool hidden) {
+    final modeKey = _modeKeyForId(id);
+    if (modeKey != null) {
+      _setModeHidden(modeKey, hidden);
+      return;
+    }
+    final slot = _slotById(id);
+    if (slot != null) _setSlotHidden(slot, hidden);
   }
 
   /// Full color palette for a specific tool (from its right-click menu).
@@ -4104,7 +4123,28 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
     _applyColor(picked, slot);
   }
 
-  List<PopupMenuEntry<_ToolMenuAction>> _toolMenuItems(ToolSlot slot) {
+  List<PopupMenuEntry<_ToolMenuAction>> _toolMenuEntries(String toolId) {
+    final slot = _slotById(toolId);
+    if (slot == null) {
+      // Built-in modes have no colour or size, so they only offer hiding.
+      final modeKey = _modeKeyForId(toolId);
+      final label =
+          (modeKey != null ? kModeVisibilityLabels[modeKey] : null) ?? toolId;
+      return <PopupMenuEntry<_ToolMenuAction>>[
+        PopupMenuItem<_ToolMenuAction>(
+          enabled: false,
+          child: Text(
+            label,
+            style: const TextStyle(fontWeight: FontWeight.w600),
+          ),
+        ),
+        const PopupMenuDivider(),
+        PopupMenuItem<_ToolMenuAction>(
+          value: _ToolMenuAction.hide(toolId),
+          child: const Text('Hide from toolbar'),
+        ),
+      ];
+    }
     final entries = <PopupMenuEntry<_ToolMenuAction>>[
       PopupMenuItem<_ToolMenuAction>(
         enabled: false,
@@ -4243,7 +4283,7 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
     entries.add(const PopupMenuDivider());
     entries.add(
       PopupMenuItem<_ToolMenuAction>(
-        value: _ToolMenuAction.hide(slot),
+        value: _ToolMenuAction.hide(toolId),
         child: const Text('Hide from toolbar'),
       ),
     );
@@ -5605,7 +5645,7 @@ class _Sidebar extends StatelessWidget {
   final VoidCallback onSelect;
 
   /// Right-click on a tool: show its options at that screen position.
-  final void Function(ToolSlot slot, Offset position) onToolMenu;
+  final void Function(String toolId, Offset position) onToolMenu;
   final VoidCallback onHand;
   final VoidCallback onEraser;
   final VoidCallback onMagnifier;
@@ -5674,6 +5714,7 @@ class _Sidebar extends StatelessWidget {
           selected: activeSlotId == kPointerSlotId,
           onPressed: onPointer,
           compact: true,
+          onSecondaryTap: (offset) => onToolMenu(kPointerSlotId, offset),
         ),
       const Divider(height: 10, color: Colors.white24),
       for (final item in CanvasMode.values)
@@ -5693,6 +5734,7 @@ class _Sidebar extends StatelessWidget {
           selected: activeSlotId == kSelectSlotId,
           onPressed: onSelect,
           compact: true,
+          onSecondaryTap: (offset) => onToolMenu(kSelectSlotId, offset),
         ),
       for (final slot in visibleSlots)
         Padding(
@@ -5724,7 +5766,7 @@ class _Sidebar extends StatelessWidget {
             color: slot.color,
             onPressed: () => onSlot(slot),
             badge: slot.toolbarBadge,
-            onSecondaryTap: (offset) => onToolMenu(slot, offset),
+            onSecondaryTap: (offset) => onToolMenu(slot.id, offset),
           ),
         ),
       if (selectedSlot != null)
@@ -5749,6 +5791,7 @@ class _Sidebar extends StatelessWidget {
           label: 'Hand (drag to move the board)',
           selected: activeSlotId == kHandSlotId,
           onPressed: onHand,
+          onSecondaryTap: (offset) => onToolMenu(kHandSlotId, offset),
         ),
       if (eraserVisible)
         _ToolIcon(
@@ -5756,6 +5799,7 @@ class _Sidebar extends StatelessWidget {
           label: 'Eraser (click or drag over objects)',
           selected: activeSlotId == '__eraser__',
           onPressed: onEraser,
+          onSecondaryTap: (offset) => onToolMenu('__eraser__', offset),
         ),
       if (magnifierVisible)
         _ToolIcon(
@@ -5763,6 +5807,7 @@ class _Sidebar extends StatelessWidget {
           label: 'Magnifier',
           selected: activeSlotId == '__magnifier__',
           onPressed: onMagnifier,
+          onSecondaryTap: (offset) => onToolMenu('__magnifier__', offset),
         ),
       if (activeSlotId == '__magnifier__')
         _MagnifierControls(
@@ -6902,46 +6947,50 @@ class _ColorChannelSlider extends StatelessWidget {
 /// One entry in a right-click tool menu. Each variant knows how to apply
 /// itself, which keeps the menu builder declarative.
 class _ToolMenuAction {
-  const _ToolMenuAction._(this.kind, this.slot, {this.color, this.value});
+  const _ToolMenuAction._(this.kind, this.slotId, {this.color, this.value});
 
   final String kind;
-  final ToolSlot slot;
+
+  /// Tool this applies to: a slot id, or a mode id such as `__magnifier__`.
+  /// Stored as an id so the action still points at the right tool after the
+  /// menu closes.
+  final String slotId;
   final Color? color;
   final double? value;
 
   factory _ToolMenuAction.color(ToolSlot slot, Color color) =>
-      _ToolMenuAction._('color', slot, color: color);
+      _ToolMenuAction._('color', slot.id, color: color);
   factory _ToolMenuAction.customColor(ToolSlot slot) =>
-      _ToolMenuAction._('custom', slot);
+      _ToolMenuAction._('custom', slot.id);
   factory _ToolMenuAction.thickness(ToolSlot slot, double value) =>
-      _ToolMenuAction._('thickness', slot, value: value);
+      _ToolMenuAction._('thickness', slot.id, value: value);
   factory _ToolMenuAction.fontSize(ToolSlot slot, double value) =>
-      _ToolMenuAction._('fontSize', slot, value: value);
+      _ToolMenuAction._('fontSize', slot.id, value: value);
   factory _ToolMenuAction.fill(ToolSlot slot, bool filled) =>
-      _ToolMenuAction._(filled ? 'fill' : 'outline', slot);
+      _ToolMenuAction._(filled ? 'fill' : 'outline', slot.id);
   factory _ToolMenuAction.editPhrase(ToolSlot slot) =>
-      _ToolMenuAction._('phrase', slot);
-  factory _ToolMenuAction.hide(ToolSlot slot) =>
-      _ToolMenuAction._('hide', slot);
+      _ToolMenuAction._('phrase', slot.id);
+  factory _ToolMenuAction.hide(String id) => _ToolMenuAction._('hide', id);
 
-  Future<void> run(_AnnotationWorkspaceState state, ToolSlot target) async {
+  Future<void> run(_AnnotationWorkspaceState state) async {
+    final target = state._slotById(slotId);
     switch (kind) {
       case 'color':
-        state._applyColor(color!, target);
+        if (target != null) state._applyColor(color!, target);
       case 'custom':
-        await state._pickColorFor(target);
+        if (target != null) await state._pickColorFor(target);
       case 'thickness':
-        state._changeThickness(value!, target);
+        if (target != null) state._changeThickness(value!, target);
       case 'fontSize':
-        state._changeFontSize(value!, target);
+        if (target != null) state._changeFontSize(value!, target);
       case 'fill':
-        state._changeFill(true, target);
+        if (target != null) state._changeFill(true, target);
       case 'outline':
-        state._changeFill(false, target);
+        if (target != null) state._changeFill(false, target);
       case 'phrase':
-        await state._editSlotPhrase(target);
+        if (target != null) await state._editSlotPhrase(target);
       case 'hide':
-        state._setSlotHidden(target, true);
+        state._setToolHidden(slotId, true);
     }
   }
 }
