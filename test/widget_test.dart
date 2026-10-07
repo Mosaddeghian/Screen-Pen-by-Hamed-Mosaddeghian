@@ -1254,6 +1254,255 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('slide-chip-0')), findsOneWidget);
   });
+  group('select tool geometry', () {
+    const stroke = StrokeDrawable(
+      <Offset>[Offset(10, 20), Offset(60, 90)],
+      Color(0xff35a7ff),
+      4,
+    );
+
+    test('bounds wrap the stroke including its pen width', () {
+      final box = drawingBounds(stroke);
+
+      expect(box, const Rect.fromLTRB(8, 18, 62, 92));
+    });
+
+    test('moving returns a copy and leaves the original untouched', () {
+      final moved = moveDrawing(stroke, const Offset(30, 40));
+
+      expect(stroke.points.first, const Offset(10, 20));
+      expect((moved as StrokeDrawable).points.first, const Offset(40, 60));
+    });
+
+    test('resizing maps points from the old box into the new box', () {
+      final from = drawingBounds(stroke);
+      final to = Rect.fromLTWH(from.left, from.top, from.width * 2, from.height);
+
+      final stretched = resizeDrawing(stroke, from, to) as StrokeDrawable;
+
+      expect(stretched.points.first, const Offset(12, 20));
+      expect(stretched.points.last.dx, 112);
+    });
+
+    test('corner hit test finds corners and ignores the middle', () {
+      const box = Rect.fromLTWH(0, 0, 100, 80);
+
+      expect(hitResizeHandle(box, Offset.zero), 0);
+      expect(hitResizeHandle(box, const Offset(100, 80)), 3);
+      expect(hitResizeHandle(box, const Offset(50, 40)), isNull);
+    });
+
+    test('a dragged corner never leaves a tiny or flipped box', () {
+      const box = Rect.fromLTWH(0, 0, 100, 80);
+
+      final dragged = boxForHandle(box, 3, const Offset(-40, -40));
+
+      expect(dragged.left, lessThanOrEqualTo(dragged.right));
+      expect(dragged.top, lessThanOrEqualTo(dragged.bottom));
+      expect(dragged.width, greaterThanOrEqualTo(16));
+      expect(dragged.height, greaterThanOrEqualTo(16));
+    });
+
+    test('readable colour and size feed the floating action bar', () {
+      expect(drawableColor(stroke), const Color(0xff35a7ff));
+      expect(drawableSize(stroke), 4);
+      expect(drawableColor(TextDrawable(Offset.zero, 'hi', Colors.red, 24)),
+          Colors.red);
+      expect(drawableSize(TextDrawable(Offset.zero, 'hi', Colors.red, 24)), 24);
+      expect(
+        drawableColor(
+          const CandleGroupDrawable(<CandleSpec>[], strokeWidth: 2),
+        ),
+        isNull,
+      );
+    });
+  });
+
+  testWidgets('select tool moves a drawing and its bar can delete it', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(const PenApp());
+    await tester.pumpAndSettle();
+
+    // The pen is the default tool, so a drag on the canvas makes a stroke.
+    final draw = await tester.startGesture(const Offset(300, 250));
+    await tester.pump();
+    await draw.moveBy(const Offset(150, 0));
+    await tester.pump();
+    await draw.moveBy(const Offset(150, 0));
+    await tester.pump();
+    await draw.up();
+    await tester.pumpAndSettle();
+
+    expect(_annotationPainter(tester).drawables, hasLength(1));
+    final original =
+        _annotationPainter(tester).drawables.single as StrokeDrawable;
+    final firstPoint = original.points.first;
+
+    await tester.tap(find.byKey(const ValueKey('tool-select')));
+    await tester.pumpAndSettle();
+    await tester.tapAt(const Offset(525, 250));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('selection-controls')), findsOneWidget);
+
+    final move = await tester.startGesture(const Offset(525, 250));
+    await tester.pump();
+    await move.moveBy(const Offset(0, 60));
+    await tester.pump();
+    await move.moveBy(const Offset(40, 40));
+    await tester.pump();
+    await move.up();
+    await tester.pumpAndSettle();
+
+    final moved =
+        _annotationPainter(tester).drawables.single as StrokeDrawable;
+    expect(moved.points.first.dx, greaterThan(firstPoint.dx));
+    expect(moved.points.first.dy, greaterThan(firstPoint.dy));
+    expect(_annotationPainter(tester).selectedBox, isNotNull);
+
+    await tester.tap(find.byKey(const ValueKey('selection-delete')));
+    await tester.pumpAndSettle();
+
+    expect(_annotationPainter(tester).drawables, isEmpty);
+    expect(find.byKey(const ValueKey('selection-controls')), findsNothing);
+  });
+
+  testWidgets('a preset phrase places its text with one canvas tap', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(const PenApp());
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Add tool slot'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byType(DropdownButtonFormField<ToolType>));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Text').last);
+    await tester.pumpAndSettle();
+
+    await tester.enterText(
+      find.byKey(const ValueKey('add-slot-phrase')),
+      'Nice work',
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, 'Add'));
+    await tester.pump();
+    // Let the confirmation snackbar finish so it can not block the canvas.
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+
+    expect(find.byTooltip('Nice work (click board to place)'), findsOneWidget);
+
+    await tester.tapAt(const Offset(600, 420));
+    await tester.pumpAndSettle();
+
+    final placed =
+        _annotationPainter(tester).drawables.single as TextDrawable;
+    expect(placed.text, 'Nice work');
+  });
+
+  testWidgets('right-click on a tool opens its menu without switching', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(const PenApp());
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('tool-highlighter-a')));
+    await tester.pumpAndSettle();
+    expect(_toolSelected(tester, 'highlighter-a'), isTrue);
+
+    final icon = tester.getCenter(find.byKey(const ValueKey('tool-pen-a')));
+    final menu = await tester.startGesture(
+      icon,
+      kind: PointerDeviceKind.mouse,
+      buttons: kSecondaryMouseButton,
+    );
+    await menu.up();
+    await tester.pumpAndSettle();
+
+    expect(find.text('More colors…'), findsOneWidget);
+    expect(_toolSelected(tester, 'highlighter-a'), isTrue);
+    expect(_toolSelected(tester, 'pen-a'), isFalse);
+  });
+
+  testWidgets('settings reorders tools with move up and move down', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(const PenApp());
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(find.byKey(const ValueKey('settings-button')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('settings-button')));
+    await tester.pumpAndSettle();
+
+    List<String> order() => find
+        .byType(IconButton)
+        .evaluate()
+        .map((element) => element.widget)
+        .whereType<IconButton>()
+        .map((button) => button.key)
+        .whereType<ValueKey<String>>()
+        .map((key) => key.value)
+        .where((value) => value.startsWith('remove-tool-'))
+        .map((value) => value.substring('remove-tool-'.length))
+        .toList();
+
+    expect(order().first, 'pen-a');
+
+    await tester.ensureVisible(find.byKey(const ValueKey('move-down-pen-a')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('move-down-pen-a')));
+    await tester.pumpAndSettle();
+
+    expect(order().take(2), <String>['highlighter-a', 'pen-a']);
+
+    await tester.ensureVisible(find.byKey(const ValueKey('move-up-pen-a')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('move-up-pen-a')));
+    await tester.pumpAndSettle();
+
+    expect(order().take(2), <String>['pen-a', 'highlighter-a']);
+  });
+
+  testWidgets('settings hides and shows a mode tool again', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1280, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(const PenApp());
+    await tester.pumpAndSettle();
+
+    expect(find.byTooltip('Magnifier'), findsOneWidget);
+
+    await tester.ensureVisible(find.byKey(const ValueKey('settings-button')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('settings-button')));
+    await tester.pumpAndSettle();
+
+    final magnifierToggle = find.byKey(const ValueKey('visible-mode-magnifier'));
+    await tester.ensureVisible(magnifierToggle);
+    await tester.pumpAndSettle();
+    await tester.tap(magnifierToggle);
+    await tester.pumpAndSettle();
+
+    expect(find.byTooltip('Magnifier'), findsNothing);
+
+    await tester.ensureVisible(magnifierToggle);
+    await tester.pumpAndSettle();
+    await tester.tap(magnifierToggle);
+    await tester.pumpAndSettle();
+
+    expect(find.byTooltip('Magnifier'), findsOneWidget);
+  });
 }
 
 AnnotationPainter _annotationPainter(WidgetTester tester) {

@@ -1,5 +1,13 @@
 ﻿# Changelog
 
+## [1.8.0] - 2026-10-08
+### Added
+- Select tool (the arrow in the toolbar): tap a drawing to select it, drag it to move it, drag a corner handle to resize it, and restyle it from the floating bar with colour, size, duplicate and delete buttons. Escape clears the selection, Delete removes the selected drawing.
+- Preset note phrases: when you add a text tool you can type a phrase to place, and it lands on the canvas with a single tap. Every text tool also has a pencil button in Settings to edit its phrase later.
+- Reorder tools: Settings ▸ Tool slots now has move-up and move-down arrows on every tool, so you decide the order they appear in the toolbar.
+- Hide tools: Settings ▸ Visible tools lets you switch off Pointer, Hand, Eraser, Magnifier and Select. Hidden tools disappear from the toolbar until you switch them back on, and a hidden tool is never left active.
+- Right-click a tool in the toolbar to open its options menu (colour, thickness, text size, fill, edit phrase, hide) without changing the tool you are currently using.
+
 ## [1.7.2] - 2026-09-16
 ### Added
 - Delete slides from the rename window: open rename (double-tap a slide or tap its pencil), tap the red Delete button, and confirm. The last remaining slide is protected so the board always keeps at least one.

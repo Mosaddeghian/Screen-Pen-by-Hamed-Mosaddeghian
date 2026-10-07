@@ -17,7 +17,7 @@ import 'package:window_manager/window_manager.dart';
 const MethodChannel _nativeChannel = MethodChannel('pen/native');
 
 /// Shown in Settings. Keep in sync with `pubspec.yaml` and `CHANGELOG.md`.
-const kAppVersion = '1.7.2';
+const kAppVersion = '1.8.0';
 
 const int _vkShift = 0x10;
 const int _shiftKeyDownBit = 0x8000;
@@ -502,6 +502,15 @@ class CandleSpec {
     'lowY': lowY,
   };
 
+  CandleSpec translate(Offset delta) => CandleSpec(
+    x: x + delta.dx,
+    width: width,
+    openY: openY + delta.dy,
+    closeY: closeY + delta.dy,
+    highY: highY + delta.dy,
+    lowY: lowY + delta.dy,
+  );
+
   factory CandleSpec.fromJson(Map<String, dynamic> json) => CandleSpec(
     x: (json['x'] as num).toDouble(),
     width: (json['width'] as num).toDouble(),
@@ -602,8 +611,269 @@ Drawable? drawableFromJson(Map<String, dynamic> json) {
   }
 }
 
+/// Current colour of a drawing, or null when the type has no single colour
+/// (candles use two). Drives the selection bar's swatch.
+Color? drawableColor(Drawable item) => switch (item) {
+  StrokeDrawable(:final color) => color,
+  LineDrawable(:final color) => color,
+  RectangleDrawable(:final color) => color,
+  TextDrawable(:final color) => color,
+  _ => null,
+};
+
+/// Current width/font size of a drawing, or null when it has none.
+/// Drives the selection bar's size control.
+double? drawableSize(Drawable item) => switch (item) {
+  StrokeDrawable(:final width) => width,
+  LineDrawable(:final width) => width,
+  RectangleDrawable(:final width) => width,
+  TextDrawable(:final fontSize) => fontSize,
+  CandleGroupDrawable(:final strokeWidth) => strokeWidth,
+  _ => null,
+};
+
+/// Grows a box to at least [min] wide/tall, keeping its top-left corner so
+/// text and shapes do not jump while being resized.
+Rect _withMinimumSize(Rect rect, double min) => Rect.fromLTWH(
+  rect.left,
+  rect.top,
+  math.max(rect.width, min),
+  math.max(rect.height, min),
+);
+
+/// The box that wraps a drawing. Used for the select tool's frame and
+/// resize handles, so it must cover everything the painter draws.
+Rect drawingBounds(Drawable item) {
+  switch (item) {
+    case StrokeDrawable():
+      if (item.points.isEmpty) return Rect.zero;
+      var left = double.infinity;
+      var top = double.infinity;
+      var right = double.negativeInfinity;
+      var bottom = double.negativeInfinity;
+      for (final point in item.points) {
+        left = math.min(left, point.dx);
+        top = math.min(top, point.dy);
+        right = math.max(right, point.dx);
+        bottom = math.max(bottom, point.dy);
+      }
+      final pad = item.width / 2;
+      return _withMinimumSize(
+        Rect.fromLTRB(left - pad, top - pad, right + pad, bottom + pad),
+        8,
+      );
+    case LineDrawable():
+      return _withMinimumSize(
+        Rect.fromPoints(item.start, item.end).inflate(item.width),
+        8,
+      );
+    case RectangleDrawable():
+      return _withMinimumSize(item.rect.inflate(item.width), 8);
+    case TextDrawable():
+      final painter = TextPainter(
+        text: TextSpan(
+          text: item.text,
+          style: TextStyle(
+            fontSize: item.fontSize,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      return Rect.fromLTWH(
+        item.position.dx,
+        item.position.dy,
+        math.max(painter.width, 8),
+        math.max(painter.height, item.fontSize),
+      );
+    case CandleGroupDrawable():
+      return _withMinimumSize(
+        candleGroupBounds(item.candles).inflate(item.strokeWidth),
+        8,
+      );
+    default:
+      return Rect.zero;
+  }
+}
+
+/// Returns a copy of [item] shifted by [delta]. Nothing is mutated, so the
+/// original can still be restored for undo.
+Drawable moveDrawing(Drawable item, Offset delta) {
+  if (delta == Offset.zero) return item;
+  switch (item) {
+    case StrokeDrawable():
+      return StrokeDrawable(
+        [for (final point in item.points) point + delta],
+        item.color,
+        item.width,
+      );
+    case LineDrawable():
+      return LineDrawable(
+        item.start + delta,
+        item.end + delta,
+        item.color,
+        item.width,
+      );
+    case RectangleDrawable():
+      return RectangleDrawable(
+        item.rect.shift(delta),
+        item.color,
+        item.width,
+        item.filled,
+      );
+    case TextDrawable():
+      return TextDrawable(
+        item.position + delta,
+        item.text,
+        item.color,
+        item.fontSize,
+      );
+    case CandleGroupDrawable():
+      return CandleGroupDrawable(
+        [for (final candle in item.candles) candle.translate(delta)],
+        strokeWidth: item.strokeWidth,
+        bullColor: item.bullColor,
+        bearColor: item.bearColor,
+      );
+    default:
+      return item;
+  }
+}
+
+/// Returns a copy of [item] re-fitted from box [from] to box [to].
+/// Everything keeps its relative place inside the box, so dragging a corner
+/// stretches the drawing instead of moving it.
+Drawable resizeDrawing(Drawable item, Rect from, Rect to) {
+  if (from.width <= 0 || from.height <= 0) return item;
+  final scaleX = to.width / from.width;
+  final scaleY = to.height / from.height;
+  Offset map(Offset point) => Offset(
+    to.left + (point.dx - from.left) * scaleX,
+    to.top + (point.dy - from.top) * scaleY,
+  );
+  switch (item) {
+    case StrokeDrawable():
+      return StrokeDrawable(
+        [for (final point in item.points) map(point)],
+        item.color,
+        item.width,
+      );
+    case LineDrawable():
+      return LineDrawable(
+        map(item.start),
+        map(item.end),
+        item.color,
+        item.width,
+      );
+    case RectangleDrawable():
+      return RectangleDrawable(
+        Rect.fromPoints(
+          map(Offset(item.rect.left, item.rect.top)),
+          map(Offset(item.rect.right, item.rect.bottom)),
+        ),
+        item.color,
+        item.width,
+        item.filled,
+      );
+    case TextDrawable():
+      return TextDrawable(
+        map(item.position),
+        item.text,
+        item.color,
+        (item.fontSize * math.sqrt(scaleX * scaleY)).clamp(12, 72).toDouble(),
+      );
+    case CandleGroupDrawable():
+      return CandleGroupDrawable(
+        [
+          for (final candle in item.candles)
+            CandleSpec(
+              x: map(Offset(candle.x, candle.openY)).dx,
+              width: math.max(
+                1,
+                map(Offset(candle.x + candle.width, candle.openY)).dx -
+                    map(Offset(candle.x, candle.openY)).dx,
+              ),
+              openY: map(Offset(candle.x, candle.openY)).dy,
+              closeY: map(Offset(candle.x, candle.closeY)).dy,
+              highY: map(Offset(candle.x, candle.highY)).dy,
+              lowY: map(Offset(candle.x, candle.lowY)).dy,
+            ),
+        ],
+        strokeWidth: math.max(
+          1,
+          item.strokeWidth * math.sqrt(scaleX * scaleY),
+        ),
+        bullColor: item.bullColor,
+        bearColor: item.bearColor,
+      );
+    default:
+      return item;
+  }
+}
+
+/// Corner handles, in this order: top-left, top-right, bottom-left,
+/// bottom-right. Returns null when [point] is not near any corner.
+int? hitResizeHandle(Rect box, Offset point, {double tolerance = 14}) {
+  final corners = <Offset>[
+    box.topLeft,
+    box.topRight,
+    box.bottomLeft,
+    box.bottomRight,
+  ];
+  for (var i = 0; i < corners.length; i++) {
+    if ((corners[i] - point).distance <= tolerance) return i;
+  }
+  return null;
+}
+
+/// The new box when corner [handle] of [box] is dragged to [point].
+/// Always normalized and never smaller than [minSize], so a drawing can not
+/// be squashed out of existence.
+Rect boxForHandle(
+  Rect box,
+  int handle,
+  Offset point, {
+  double minSize = 16,
+}) {
+  final raw = switch (handle) {
+    0 => Rect.fromLTRB(point.dx, point.dy, box.right, box.bottom),
+    1 => Rect.fromLTRB(box.left, point.dy, point.dx, box.bottom),
+    2 => Rect.fromLTRB(point.dx, box.top, box.right, point.dy),
+    _ => Rect.fromLTRB(box.left, box.top, point.dx, point.dy),
+  };
+  final left = math.min(raw.left, raw.right);
+  final top = math.min(raw.top, raw.bottom);
+  return Rect.fromLTWH(
+    left,
+    top,
+    math.max(raw.width, minSize),
+    math.max(raw.height, minSize),
+  );
+}
+
 /// Hand tool id. Like eraser/magnifier it is a mode, not a saved ToolSlot.
 const String kHandSlotId = '__hand__';
+
+/// Select tool id. Picks, moves, resizes, and restyles drawings.
+const String kSelectSlotId = '__select__';
+
+/// The four side-bar modes that can be hidden by the user, and the labels
+/// shown in Settings. These are not ToolSlots, so they use their own ids.
+const List<String> kModeVisibilityKeys = <String>[
+  'pointer',
+  'hand',
+  'eraser',
+  'magnifier',
+  'select',
+];
+
+const Map<String, String> kModeVisibilityLabels = <String, String>{
+  'pointer': 'Pointer',
+  'hand': 'Hand',
+  'eraser': 'Eraser',
+  'magnifier': 'Magnifier',
+  'select': 'Select',
+};
 
 /// How far (share of screen width/height) you must drag to change slide.
 const double kSlidePanFraction = 0.4;
@@ -910,6 +1180,11 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
   String? _toolBeforeCollapse;
   ToolbarDock _toolbarDock = ToolbarDock.left;
   bool _sidebarOpen = true;
+
+  /// Tools hidden from the side bar by the user. Modes use fixed keys
+  /// (see [kModeVisibilityKeys]); drawing tools use their slot id.
+  final _hiddenSlotIds = <String>{};
+  final _hiddenModes = <String>{};
   bool _paletteOpen = false;
   bool _presentationCursor = false;
   bool _passThrough = false;
@@ -935,6 +1210,16 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
   bool _shuttingDown = false;
   bool _hitTestSyncScheduled = false;
   CandleGroupDrawable? _pendingCandle;
+  Drawable? _selectedDrawable;
+  Offset? _pointerDownLocal;
+  Offset? _selectGestureStart;
+  Offset? _selectGesturePress;
+  Drawable? _selectGestureOrigin;
+  Rect? _selectGestureBox;
+  int? _selectHandle;
+  bool _selectGestureActive = false;
+  bool _selectUndoPushed = false;
+  final _selectionBarKey = GlobalKey();
   int _passThroughOverlayDepth = 0;
   ui.Image? _magnifierImage;
   final _toolbarKey = GlobalKey();
@@ -955,7 +1240,9 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
   bool get _isPointerMode => _activeSlotId == kPointerSlotId;
   bool get _isHandSelected => _activeSlotId == kHandSlotId;
   bool get _isIdleDesktop => _activeSlotId == null;
-  bool get _hasDrawingTool => _activeSlotId != null && !_isPointerMode;
+  bool get _isSelectSelected => _activeSlotId == kSelectSlotId;
+  bool get _hasDrawingTool =>
+      _activeSlotId != null && !_isPointerMode && !_isSelectSelected;
   bool get _isBoardMode =>
       _mode == CanvasMode.whiteboard || _mode == CanvasMode.blackboard;
   List<BoardSlide> get _activeSlides {
@@ -1021,6 +1308,16 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
     return screen - camera - _activeSlideOrigin();
   }
 
+  /// Drawing position inside the active slide -> screen position. Exact
+  /// opposite of [_screenToActiveLocal], used to float the selection bar.
+  Offset _activeLocalToScreen(Offset local) {
+    if (!_isBoardMode) return local;
+    final camera = _isBoardFocused
+        ? cameraForSlide(_ensureActiveSlide(), _viewportSize)
+        : _activePan;
+    return local + camera + _activeSlideOrigin();
+  }
+
   /// Desktop click-through when idle, pointer, or magnifier is active (toolbar
   /// still hit-tests), or when the toolbar is collapsed.
   bool get _wantPassThrough =>
@@ -1035,6 +1332,7 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
         id == '__eraser__' ||
         id == kPointerSlotId ||
         id == kHandSlotId ||
+        id == kSelectSlotId ||
         id == '__magnifier__') {
       return null;
     }
@@ -1455,17 +1753,34 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
         }
       }
 
+      // Tools the user turned off. Unknown ids are kept so nothing that is
+      // briefly missing at startup gets silently un-hidden.
+      final rawHiddenSlots = prefs.getStringList('hidden_slot_ids');
+      if (rawHiddenSlots != null) _hiddenSlotIds.addAll(rawHiddenSlots);
+      final rawHiddenModes = prefs.getStringList('hidden_modes');
+      if (rawHiddenModes != null) {
+        _hiddenModes.addAll(
+          rawHiddenModes.where(kModeVisibilityKeys.contains),
+        );
+      }
+
       final savedSlot = prefs.getString('active_slot');
       if (savedSlot == '__none__') {
         _activeSlotId = null;
       } else if (savedSlot == kPointerSlotId ||
           savedSlot == kHandSlotId ||
+          savedSlot == kSelectSlotId ||
           savedSlot == '__eraser__' ||
           savedSlot == '__magnifier__' ||
           (savedSlot != null && _slots.any((slot) => slot.id == savedSlot))) {
         _activeSlotId = savedSlot;
       } else {
         _activeSlotId = _slots.first.id;
+      }
+      // The saved tool may be one you turned off since. Fall back to the
+      // first visible tool so the app never starts with a hidden tool.
+      if (_activeSlotId != null && _isActiveToolHidden()) {
+        _activeSlotId = _firstVisibleToolId();
       }
       final dockName = prefs.getString('toolbar_dock');
       if (dockName != null) {
@@ -1624,11 +1939,24 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
   Future<void> _setActiveSlot(String? id) async {
     if (_editingText) _commitInlineText();
     _commitPendingCandle();
+    // Never activate a tool the user turned off; use the first visible one.
+    if (id != null) {
+      final modeKey = _modeKeyForId(id);
+      final hidden = modeKey != null
+          ? _isModeHidden(modeKey)
+          : _hiddenSlotIds.contains(id);
+      if (hidden) id = _firstVisibleToolId();
+    }
     final leavingMagnifier = _isMagnifierSelected && id != '__magnifier__';
     setState(() {
       _activeSlotId = id;
       _paletteOpen = false;
       _isPanningBoard = false;
+      // Selection only makes sense while the select tool stays active.
+      _selectedDrawable = null;
+      _selectGestureActive = false;
+      _selectHandle = null;
+      _selectGestureOrigin = null;
       if (id != null &&
           id != '__magnifier__' &&
           id != kPointerSlotId &&
@@ -1703,6 +2031,15 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
       _hitTestSyncScheduled = false;
       unawaited(_syncHitTestRects());
     });
+  }
+
+  /// True when a global point sits inside a toolbar widget's box.
+  bool _isPointerOverWidget(Offset globalPosition, GlobalKey key) {
+    final box = key.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return false;
+    if (box.size.width <= 0 || box.size.height <= 0) return false;
+    final origin = box.localToGlobal(Offset.zero);
+    return (origin & box.size).contains(globalPosition);
   }
 
   Map<String, int>? _hitTestRectForKey(GlobalKey key, double dpr) {
@@ -1870,6 +2207,14 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
     await prefs.setString('magnifier_size', _magnifierSize.name);
     await prefs.setString('screenshot_folder', _screenshotFolder);
     await prefs.setString('board_pan_key', _panKey.name);
+    await prefs.setStringList(
+      'hidden_slot_ids',
+      _hiddenSlotIds.toList(growable: false),
+    );
+    await prefs.setStringList(
+      'hidden_modes',
+      _hiddenModes.toList(growable: false),
+    );
     if (_rememberContent) {
       // Screen mode still uses the old single list. Boards use slides.
       final screenDrawings = _canvas[CanvasMode.screen]!
@@ -1996,6 +2341,11 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
           ..clear()
           ..addAll(previous);
       }
+      // The selected object may no longer be in the list.
+      _selectedDrawable = null;
+      _selectGestureActive = false;
+      _selectHandle = null;
+      _selectGestureOrigin = null;
     });
     _scheduleSave();
   }
@@ -2003,7 +2353,244 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
   void _clearCanvas() {
     if (_activeDrawables.isEmpty) return;
     _pushUndo();
-    setState(() => _activeDrawables.clear());
+    setState(() {
+      _activeDrawables.clear();
+      _selectedDrawable = null;
+    });
+    _scheduleSave();
+  }
+
+  // ---------------------------------------------------------------------
+  // Select tool
+  // ---------------------------------------------------------------------
+
+  int get _selectedDrawableIndex =>
+      _selectedDrawable == null ? -1 : _activeDrawables.indexOf(_selectedDrawable!);
+
+  /// Box of the selected drawing in canvas coordinates, or null.
+  Rect? get _selectedBox {
+    final index = _selectedDrawableIndex;
+    if (index < 0) return null;
+    return drawingBounds(_activeDrawables[index]);
+  }
+
+  /// Box of the selected drawing in window coordinates (for painting the
+  /// frame on top of the camera transform, and for floating the action bar).
+  Rect? get _selectedScreenBox {
+    final box = _selectedBox;
+    if (box == null) return null;
+    return Rect.fromPoints(
+      _activeLocalToScreen(box.topLeft),
+      _activeLocalToScreen(box.bottomRight),
+    );
+  }
+
+  void _clearSelection() {
+    if (_selectedDrawable == null && !_selectGestureActive) return;
+    setState(() {
+      _selectedDrawable = null;
+      _selectGestureActive = false;
+      _selectHandle = null;
+      _selectGestureOrigin = null;
+      _selectGestureStart = null;
+      _selectGestureBox = null;
+      _selectUndoPushed = false;
+    });
+  }
+
+  void _replaceSelected(Drawable next) {
+    final index = _selectedDrawableIndex;
+    if (index < 0) return;
+    setState(() {
+      _activeDrawables[index] = next;
+      _selectedDrawable = next;
+    });
+  }
+
+  /// One undo entry per gesture: recorded the first time the selection
+  /// actually changes, so a plain click never clutters the undo history.
+  void _ensureSelectUndo() {
+    if (_selectUndoPushed) return;
+    _pushUndo();
+    _selectUndoPushed = true;
+  }
+
+  /// Tap with the select tool: pick the topmost drawing under the pointer,
+  /// or drop the selection when the tap lands on empty space.
+  void _selectAt(Offset screen) {
+    final local = _isBoardMode ? _screenToActiveLocal(screen) : screen;
+    final drawables = _activeDrawables;
+    for (var i = drawables.length - 1; i >= 0; i--) {
+      if (_hitTest(drawables[i], local)) {
+        final hit = drawables[i];
+        if (identical(_selectedDrawable, hit)) return;
+        setState(() => _selectedDrawable = hit);
+        return;
+      }
+    }
+    if (_selectedDrawable != null) {
+      setState(() => _selectedDrawable = null);
+    }
+  }
+
+  void _startSelectGesture(Offset screen) {
+    final pressScreen = _pointerDownLocal ?? screen;
+    final press = _isBoardMode
+        ? _screenToActiveLocal(pressScreen)
+        : pressScreen;
+    final start = _isBoardMode ? _screenToActiveLocal(screen) : screen;
+    final box = _selectedBox;
+    final handle = box == null ? null : hitResizeHandle(box, press);
+    if (handle != null) {
+      setState(() {
+        _selectHandle = handle;
+        _selectGestureStart = start;
+        _selectGesturePress = press;
+        _selectGestureBox = box;
+        _selectGestureOrigin = _selectedDrawable;
+        _selectGestureActive = true;
+        _selectUndoPushed = false;
+      });
+      return;
+    }
+    Drawable? hit;
+    final drawables = _activeDrawables;
+    for (var i = drawables.length - 1; i >= 0; i--) {
+      if (_hitTest(drawables[i], press)) {
+        hit = drawables[i];
+        break;
+      }
+    }
+    if (hit == null) {
+      if (_selectedDrawable != null) setState(() => _selectedDrawable = null);
+      return;
+    }
+    final Drawable found = hit;
+    setState(() {
+      _selectedDrawable = found;
+      _selectHandle = null;
+      _selectGestureStart = start;
+      _selectGesturePress = press;
+      _selectGestureOrigin = found;
+      _selectGestureBox = drawingBounds(found);
+      _selectGestureActive = true;
+      _selectUndoPushed = false;
+    });
+  }
+
+  void _updateSelectGesture(Offset screen) {
+    if (!_selectGestureActive) return;
+    final local = _isBoardMode ? _screenToActiveLocal(screen) : screen;
+    final origin = _selectGestureOrigin;
+    final start = _selectGestureStart;
+    final press = _selectGesturePress;
+    if (origin == null || start == null) return;
+    if (_selectHandle != null) {
+      final box = _selectGestureBox;
+      if (box == null) return;
+      // Keep the corner under the finger: the drag only starts after the
+      // pointer moved, so shift back by that first jump.
+      final point = press == null ? local : local - (start - press);
+      final next = boxForHandle(box, _selectHandle!, point);
+      if (next == box) return;
+      _ensureSelectUndo();
+      _replaceSelected(resizeDrawing(origin, box, next));
+    } else {
+      final delta = local - start;
+      if (delta.distance < 1) return;
+      _ensureSelectUndo();
+      _replaceSelected(moveDrawing(origin, delta));
+    }
+  }
+
+  void _finishSelectGesture() {
+    if (!_selectGestureActive) return;
+    final changed = _selectUndoPushed;
+    setState(() {
+      _selectGestureActive = false;
+      _selectHandle = null;
+      _selectGestureOrigin = null;
+      _selectGestureStart = null;
+      _selectGesturePress = null;
+      _selectGestureBox = null;
+      _selectUndoPushed = false;
+    });
+    if (changed) _scheduleSave();
+  }
+
+  void _deleteSelectedDrawable() {
+    final index = _selectedDrawableIndex;
+    if (index < 0) return;
+    _pushUndo();
+    setState(() {
+      _activeDrawables.removeAt(index);
+      _selectedDrawable = null;
+    });
+    _scheduleSave();
+  }
+
+  void _duplicateSelectedDrawable() {
+    final index = _selectedDrawableIndex;
+    if (index < 0) return;
+    final copy = drawableFromJson(_activeDrawables[index].toJson());
+    if (copy == null) return;
+    _pushUndo();
+    setState(() {
+      _activeDrawables.insert(index + 1, moveDrawing(copy, const Offset(24, 24)));
+      _selectedDrawable = _activeDrawables[index + 1];
+    });
+    _scheduleSave();
+  }
+
+  void _recolorSelectedDrawable(Color color) {
+    final index = _selectedDrawableIndex;
+    if (index < 0) return;
+    final current = _activeDrawables[index];
+    if (drawableColor(current) == color) return;
+    final Drawable updated = switch (current) {
+      StrokeDrawable() => StrokeDrawable(current.points, color, current.width),
+      LineDrawable() => LineDrawable(current.start, current.end, color, current.width),
+      RectangleDrawable() =>
+        RectangleDrawable(current.rect, color, current.width, current.filled),
+      TextDrawable() => TextDrawable(current.position, current.text, color, current.fontSize),
+      _ => current,
+    };
+    _pushUndo();
+    _replaceSelected(updated);
+    _scheduleSave();
+  }
+
+  void _rescaleSelectedDrawable(double value) {
+    final index = _selectedDrawableIndex;
+    if (index < 0) return;
+    final current = _activeDrawables[index];
+    // The selector speaks about thickness, which is four times a candle's
+    // stroke width; compare in the same unit the control uses.
+    final currentSize = current is CandleGroupDrawable
+        ? (drawableSize(current) ?? 1) * 4
+        : drawableSize(current);
+    if (currentSize == value) return;
+    final Drawable updated = switch (current) {
+      StrokeDrawable() => StrokeDrawable(current.points, current.color, value),
+      LineDrawable() => LineDrawable(current.start, current.end, current.color, value),
+      RectangleDrawable() =>
+        RectangleDrawable(current.rect, current.color, value, current.filled),
+      TextDrawable() => TextDrawable(
+        current.position,
+        current.text,
+        current.color,
+        value.clamp(12, 72).toDouble(),
+      ),
+      CandleGroupDrawable() => CandleGroupDrawable(
+        current.candles,
+        strokeWidth: (value / 4).clamp(1, 8).toDouble(),
+        bullColor: current.bullColor,
+        bearColor: current.bearColor,
+      ),
+      _ => current,
+    };
+    _pushUndo();
+    _replaceSelected(updated);
     _scheduleSave();
   }
 
@@ -2015,6 +2602,8 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
       _mode = mode;
       _paletteOpen = false;
       _isPanningBoard = false;
+      _selectedDrawable = null;
+      _selectGestureActive = false;
       if (mode != CanvasMode.screen) {
         _ensureActiveSlide();
         _boardFocused[mode] = true;
@@ -2080,6 +2669,10 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
       _boardFocused[_mode] = true;
       _boardPan[_mode] = cameraForSlide(_ensureActiveSlide(), _viewportSize);
       _isPanningBoard = false;
+      _selectedDrawable = null;
+      _selectGestureActive = false;
+      _selectHandle = null;
+      _selectGestureOrigin = null;
       _draftStart = null;
       _draftEnd = null;
       _draftPoints = <Offset>[];
@@ -2160,6 +2753,10 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
       slides.removeAt(index);
       // Drop its undo history with it.
       _slideUndo.remove(slide.id);
+      _selectedDrawable = null;
+      _selectGestureActive = false;
+      _selectHandle = null;
+      _selectGestureOrigin = null;
       if (wasActive) {
         final next = slides[index < slides.length ? index : slides.length - 1];
         _activeSlideId[_mode] = next.id;
@@ -2225,6 +2822,102 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
       _scheduleSave();
     }
   }
+
+  /// Move a slot one step up or down the list. The side bar renders `_slots`
+  /// in list order, so this reorders the toolbar too.
+  void _moveSlot(ToolSlot slot, int delta) {
+    final index = _slots.indexWhere((item) => item.id == slot.id);
+    if (index < 0) return;
+    final target = index + delta;
+    if (target < 0 || target >= _slots.length) return;
+    setState(() {
+      final moved = _slots.removeAt(index);
+      _slots.insert(target, moved);
+    });
+    _scheduleSave();
+  }
+
+  bool _isSlotHidden(ToolSlot slot) => _hiddenSlotIds.contains(slot.id);
+
+  bool _isModeHidden(String modeKey) => _hiddenModes.contains(modeKey);
+
+  /// Hide or show one tool. Hiding the tool you are currently using falls
+  /// back to the first visible tool (or idle desktop) so you can never get
+  /// stuck with no working tool.
+  void _setSlotHidden(ToolSlot slot, bool hidden) {
+    setState(() {
+      if (hidden) {
+        _hiddenSlotIds.add(slot.id);
+      } else {
+        _hiddenSlotIds.remove(slot.id);
+      }
+    });
+    if (hidden && _activeSlotId == slot.id) {
+      final fallback = _firstVisibleToolId();
+      unawaited(_setActiveSlot(fallback));
+    } else {
+      _scheduleSave();
+    }
+  }
+
+  void _setModeHidden(String modeKey, bool hidden) {
+    setState(() {
+      if (hidden) {
+        _hiddenModes.add(modeKey);
+      } else {
+        _hiddenModes.remove(modeKey);
+      }
+    });
+    if (hidden && _activeSlotId == _modeIdForKey(modeKey)) {
+      final fallback = _firstVisibleToolId();
+      unawaited(_setActiveSlot(fallback));
+    } else {
+      _scheduleSave();
+    }
+  }
+
+  /// Side-bar id for a mode key, or null for keys without a tool id.
+  String? _modeIdForKey(String modeKey) => switch (modeKey) {
+    'pointer' => kPointerSlotId,
+    'hand' => kHandSlotId,
+    'eraser' => '__eraser__',
+    'magnifier' => '__magnifier__',
+    'select' => kSelectSlotId,
+    _ => null,
+  };
+
+  /// First usable tool that is still visible: slots first, then modes.
+  String? _firstVisibleToolId() {
+    for (final slot in _slots) {
+      if (!_isSlotHidden(slot)) return slot.id;
+    }
+    for (final key in kModeVisibilityKeys) {
+      if (!_isModeHidden(key)) {
+        final id = _modeIdForKey(key);
+        if (id != null) return id;
+      }
+    }
+    return null;
+  }
+
+  /// True when the current tool is one the user turned off.
+  bool _isActiveToolHidden() {
+    final id = _activeSlotId;
+    if (id == null) return false;
+    final modeKey = _modeKeyForId(id);
+    if (modeKey != null) return _isModeHidden(modeKey);
+    return _hiddenSlotIds.contains(id);
+  }
+
+  /// Mode visibility key for a side-bar tool id, or null for slot tools.
+  String? _modeKeyForId(String id) => switch (id) {
+    kPointerSlotId => 'pointer',
+    kHandSlotId => 'hand',
+    '__eraser__' => 'eraser',
+    '__magnifier__' => 'magnifier',
+    kSelectSlotId => 'select',
+    _ => null,
+  };
 
   void _toggleSlot(ToolSlot slot) {
     unawaited(_setActiveSlot(_activeSlotId == slot.id ? null : slot.id));
@@ -2295,6 +2988,12 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
 
   void _onCanvasPointerDown(PointerDownEvent event) {
     if (_passThroughOverlayDepth > 0) return;
+    if ((event.buttons & kPrimaryMouseButton) != 0) {
+      // Where the press really happened. A drag only starts once the pointer
+      // moved far enough, so the select tool must hit-test this point rather
+      // than the later "drag accepted" position.
+      _pointerDownLocal = event.localPosition;
+    }
     if ((event.buttons & kMiddleMouseButton) != 0) {
       if (_isBoardMode) {
         _middlePanArmed = true;
@@ -2302,7 +3001,14 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
       return;
     }
     if ((event.buttons & kSecondaryMouseButton) != 0) {
-      if (_hasDrawingTool) {
+      // Right-clicking a toolbar control opens that tool's options instead
+      // of deselecting, so never treat a toolbar click as a canvas click.
+      if (_isPointerOverWidget(event.position, _toolbarKey) ||
+          _isPointerOverWidget(event.position, _restoreKey) ||
+          _isPointerOverWidget(event.position, _selectionBarKey)) {
+        return;
+      }
+      if (_hasDrawingTool || _isSelectSelected) {
         _selectIdleDesktop();
       }
       return;
@@ -2332,31 +3038,31 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
     _scheduleHitTestSync();
   }
 
-  void _changeThickness(double value) {
-    final slot = _selectedSlot;
+  void _changeThickness(double value, [ToolSlot? target]) {
+    final slot = target ?? _selectedSlot;
     if (slot == null || slot.type == ToolType.text) return;
     setState(() => slot.thickness = value.clamp(1, 24).toDouble());
     _scheduleSave();
   }
 
-  void _changeFontSize(double value) {
-    final slot = _selectedSlot;
+  void _changeFontSize(double value, [ToolSlot? target]) {
+    final slot = target ?? _selectedSlot;
     if (slot == null || slot.type != ToolType.text) return;
     setState(() => slot.fontSize = value.clamp(12, 72).toDouble());
     _scheduleSave();
   }
 
-  void _changeFill(bool value) {
-    final slot = _selectedSlot;
+  void _changeFill(bool value, [ToolSlot? target]) {
+    final slot = target ?? _selectedSlot;
     if (slot == null || slot.type != ToolType.rectangle) return;
     setState(() => slot.filled = value);
     _scheduleSave();
   }
 
-  void _applyColor(Color color) {
-    if (_isEraserSelected) return;
-    final slot = _selectedSlot;
+  void _applyColor(Color color, [ToolSlot? target]) {
+    final slot = target ?? _selectedSlot;
     if (slot == null) return;
+    if (target == null && _isEraserSelected) return;
     final nextColor = color.withValues(alpha: 1);
     setState(() {
       slot.color = nextColor;
@@ -2434,6 +3140,12 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
       });
       return;
     }
+    if (_isSelectSelected) {
+      _keyboardFocus.requestFocus();
+      _pointerPosition = details.localPosition;
+      _startSelectGesture(details.localPosition);
+      return;
+    }
     if (!_hasDrawingTool) return;
     _keyboardFocus.requestFocus();
     _shiftPressed = isShiftHeld();
@@ -2472,6 +3184,7 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
     }
     if (_shouldPanBoard()) {
       // Pan-key pressed mid-gesture: switch from drawing to moving.
+      _finishSelectGesture();
       _isPanningBoard = true;
       _panStartLocal = details.localPosition;
       _panBase = _isBoardMode ? _cameraForPaint() : Offset.zero;
@@ -2483,6 +3196,11 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
         _draftEnd = null;
         _draftPoints = <Offset>[];
       });
+      return;
+    }
+    if (_isSelectSelected) {
+      _pointerPosition = details.localPosition;
+      _updateSelectGesture(details.localPosition);
       return;
     }
     if (!_hasDrawingTool) return;
@@ -2526,6 +3244,7 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
       return;
     }
     _middlePanArmed = false;
+    _finishSelectGesture();
     if (_draftStart == null && _draftEnd == null && _draftPoints.isEmpty) {
       return;
     }
@@ -2545,6 +3264,7 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
       return;
     }
     _middlePanArmed = false;
+    _finishSelectGesture();
     if (!_hasDrawingTool) return;
     if (_isEraserSelected) {
       if (_eraserGestureChanged) _scheduleSave();
@@ -2656,6 +3376,12 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
 
   void _canvasTap(TapUpDetails details) {
     if (_isHandSelected) return;
+    if (_isSelectSelected) {
+      _keyboardFocus.requestFocus();
+      _pointerPosition = details.localPosition;
+      _selectAt(details.localPosition);
+      return;
+    }
     if (!_hasDrawingTool) return;
     _pointerPosition = details.localPosition;
     final local = _isBoardMode
@@ -3126,64 +3852,35 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
                       ),
                     ),
                     const Divider(),
-                    const _SettingSectionTitle('Tool slots'),
-                    ..._slots.map(
-                      (slot) => ListTile(
+                    const _SettingSectionTitle('Visible tools'),
+                    const Text(
+                      'Turn a tool off to hide it from the side bar. It stays '
+                      'saved and comes back when you turn it on.',
+                      style: TextStyle(fontSize: 12, color: Colors.white60),
+                    ),
+                    const SizedBox(height: 8),
+                    for (final modeKey in kModeVisibilityKeys)
+                      SwitchListTile(
+                        key: ValueKey('visible-mode-$modeKey'),
                         dense: true,
                         contentPadding: EdgeInsets.zero,
-                        leading: slot.type.icon != null
-                            ? Icon(slot.type.icon, color: slot.color)
-                            : ColorFiltered(
-                                colorFilter: ColorFilter.mode(
-                                  slot.color,
-                                  BlendMode.srcATop,
-                                ),
-                                child: slot.type.toolbarIcon,
-                              ),
-                        title: Text(slot.toolbarTitle ?? slot.type.label),
-                        subtitle: Text(switch (slot.type) {
-                          ToolType.text =>
-                            '${slot.fontSize.toStringAsFixed(0)} px text',
-                          ToolType.rectangle =>
-                            '${slot.thickness.toStringAsFixed(0)} px  •  '
-                                '${slot.filled ? 'Filled' : 'Outline'}',
-                          ToolType.candlestick =>
-                            '${slot.thickness.toStringAsFixed(0)} px candle',
-                          _ => '${slot.thickness.toStringAsFixed(0)} px',
-                        }),
-                        trailing: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            IconButton(
-                              key: ValueKey('remove-tool-${slot.id}'),
-                              tooltip: 'Remove tool',
-                              onPressed: _slots.length <= 1
-                                  ? null
-                                  : () {
-                                      _removeSlot(slot);
-                                      setDialogState(() {});
-                                    },
-                              icon: const Icon(Icons.delete_outline),
-                            ),
-                            IconButton(
-                              tooltip: 'Select slot',
-                              onPressed: () {
-                                _selectSlot(slot);
-                                setDialogState(() {});
-                              },
-                              icon: Icon(
-                                _activeSlotId == slot.id
-                                    ? Icons.radio_button_checked
-                                    : Icons.radio_button_off,
-                                color: _activeSlotId == slot.id
-                                    ? Theme.of(context).colorScheme.primary
-                                    : null,
-                              ),
-                            ),
-                          ],
-                        ),
+                        title: Text(kModeVisibilityLabels[modeKey] ?? modeKey),
+                        value: !_isModeHidden(modeKey),
+                        onChanged: (value) {
+                          _setModeHidden(modeKey, !value);
+                          setDialogState(() {});
+                        },
                       ),
-                    ),
+                    const Divider(),
+                    const _SettingSectionTitle('Tool slots'),
+                    for (var slotIndex = 0;
+                        slotIndex < _slots.length;
+                        slotIndex++)
+                      _slotSettingsTile(
+                        _slots[slotIndex],
+                        slotIndex,
+                        setDialogState,
+                      ),
                     OutlinedButton.icon(
                       onPressed: () async {
                         Navigator.pop(context);
@@ -3220,6 +3917,339 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
     }
   }
 
+  /// One row in Settings ▸ Tool slots: reorder arrows, visibility eye,
+  /// phrase editor (text tools), remove, and select.
+  Widget _slotSettingsTile(
+    ToolSlot slot,
+    int index,
+    StateSetter setDialogState,
+  ) {
+    return ListTile(
+      dense: true,
+      contentPadding: EdgeInsets.zero,
+      leading: slot.type.icon != null
+          ? Icon(slot.type.icon, color: slot.color)
+          : ColorFiltered(
+              colorFilter: ColorFilter.mode(slot.color, BlendMode.srcATop),
+              child: slot.type.toolbarIcon,
+            ),
+      title: Text(slot.toolbarTitle ?? slot.type.label),
+      subtitle: Text(switch (slot.type) {
+        ToolType.text => '${slot.fontSize.toStringAsFixed(0)} px text',
+        ToolType.rectangle =>
+          '${slot.thickness.toStringAsFixed(0)} px  •  '
+              '${slot.filled ? 'Filled' : 'Outline'}',
+        ToolType.candlestick => '${slot.thickness.toStringAsFixed(0)} px candle',
+        _ => '${slot.thickness.toStringAsFixed(0)} px',
+      }),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IconButton(
+            key: ValueKey('move-up-${slot.id}'),
+            tooltip: 'Move up in the toolbar',
+            onPressed: index == 0
+                ? null
+                : () {
+                    _moveSlot(slot, -1);
+                    setDialogState(() {});
+                  },
+            icon: const Icon(Icons.arrow_upward, size: 18),
+          ),
+          IconButton(
+            key: ValueKey('move-down-${slot.id}'),
+            tooltip: 'Move down in the toolbar',
+            onPressed: index == _slots.length - 1
+                ? null
+                : () {
+                    _moveSlot(slot, 1);
+                    setDialogState(() {});
+                  },
+            icon: const Icon(Icons.arrow_downward, size: 18),
+          ),
+          IconButton(
+            key: ValueKey('toggle-visible-${slot.id}'),
+            tooltip: _isSlotHidden(slot)
+                ? 'Show tool in the toolbar'
+                : 'Hide tool from the toolbar',
+            onPressed: () {
+              _setSlotHidden(slot, !_isSlotHidden(slot));
+              setDialogState(() {});
+            },
+            icon: Icon(
+              _isSlotHidden(slot)
+                  ? Icons.visibility_off_outlined
+                  : Icons.visibility_outlined,
+              size: 18,
+            ),
+          ),
+          if (slot.type == ToolType.text)
+            IconButton(
+              key: ValueKey('edit-phrase-${slot.id}'),
+              tooltip: 'Edit the phrase this tool places',
+              onPressed: () async {
+                await _editSlotPhrase(slot);
+                setDialogState(() {});
+              },
+              icon: const Icon(Icons.edit_note_outlined, size: 18),
+            ),
+          IconButton(
+            key: ValueKey('remove-tool-${slot.id}'),
+            tooltip: 'Remove tool',
+            onPressed: _slots.length <= 1
+                ? null
+                : () {
+                    _removeSlot(slot);
+                    setDialogState(() {});
+                  },
+            icon: const Icon(Icons.delete_outline),
+          ),
+          IconButton(
+            tooltip: 'Select slot',
+            onPressed: () {
+              _selectSlot(slot);
+              setDialogState(() {});
+            },
+            icon: Icon(
+              _activeSlotId == slot.id
+                  ? Icons.radio_button_checked
+                  : Icons.radio_button_off,
+              color: _activeSlotId == slot.id
+                  ? Theme.of(context).colorScheme.primary
+                  : null,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Change (or clear) the phrase a text tool stamps. Empty means the tool
+  /// goes back to the free-typing caret.
+  Future<void> _editSlotPhrase(ToolSlot slot) async {
+    final controller = TextEditingController(text: slot.presetText ?? '');
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Edit phrase'),
+        content: SizedBox(
+          width: 360,
+          child: TextField(
+            key: const ValueKey('phrase-field'),
+            controller: controller,
+            autofocus: true,
+            maxLength: 80,
+            decoration: const InputDecoration(
+              hintText: 'Leave empty to type your own text when you click',
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (saved != true || !mounted) return;
+    final phrase = controller.text.trim();
+    setState(() => slot.presetText = phrase.isEmpty ? null : phrase);
+    _scheduleSave();
+  }
+
+  void _selectTool() {
+    unawaited(
+      _setActiveSlot(_activeSlotId == kSelectSlotId ? null : kSelectSlotId),
+    );
+  }
+
+  /// Right-click on a tool: a small menu with that tool's own attributes
+  /// (color, thickness, phrase, and so on). The active tool never changes,
+  /// so a right-click can't interrupt what you are drawing with.
+  Future<void> _showToolMenu(ToolSlot slot, Offset globalPosition) async {
+    await _suspendPassThroughForOverlay();
+    try {
+      if (!mounted) return;
+      final size = MediaQuery.maybeOf(context)?.size ?? const Size(1180, 760);
+      final result = await showMenu<_ToolMenuAction>(
+        context: context,
+        position: RelativeRect.fromLTRB(
+          globalPosition.dx,
+          globalPosition.dy,
+          math.max(0, size.width - globalPosition.dx),
+          math.max(0, size.height - globalPosition.dy),
+        ),
+        items: _toolMenuItems(slot),
+      );
+      if (result == null || !mounted) return;
+      await result.run(this, slot);
+    } finally {
+      await _resumePassThroughAfterOverlay();
+      _scheduleHitTestSync();
+    }
+  }
+
+  /// Full color palette for a specific tool (from its right-click menu).
+  Future<void> _pickColorFor(ToolSlot slot) async {
+    final picked = await showDialog<Color>(
+      context: context,
+      builder: (context) => _ColorDialog(initialColor: slot.color),
+    );
+    if (picked == null || !mounted) return;
+    _applyColor(picked, slot);
+  }
+
+  List<PopupMenuEntry<_ToolMenuAction>> _toolMenuItems(ToolSlot slot) {
+    final entries = <PopupMenuEntry<_ToolMenuAction>>[
+      PopupMenuItem<_ToolMenuAction>(
+        enabled: false,
+        child: Text(
+          slot.toolbarTitle ?? slot.type.label,
+          style: const TextStyle(fontWeight: FontWeight.w600),
+        ),
+      ),
+      const PopupMenuDivider(),
+      PopupMenuItem<_ToolMenuAction>(
+        enabled: false,
+        child: Text(
+          'Color',
+          style: TextStyle(
+            fontSize: 12,
+            color: Colors.white.withValues(alpha: .55),
+          ),
+        ),
+      ),
+      for (final color in _quickColors)
+        PopupMenuItem<_ToolMenuAction>(
+          value: _ToolMenuAction.color(slot, color),
+          child: Row(
+            children: [
+              Container(
+                width: 18,
+                height: 18,
+                decoration: BoxDecoration(
+                  color: color,
+                  shape: BoxShape.circle,
+                  border: Border.all(color: Colors.white38),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Text(_colorHex(color)),
+              const Spacer(),
+              if (_sameRgb(color, slot.color))
+                const Icon(Icons.check, size: 16),
+            ],
+          ),
+        ),
+      PopupMenuItem<_ToolMenuAction>(
+        value: _ToolMenuAction.customColor(slot),
+        child: const Text('More colors…'),
+      ),
+    ];
+
+    if (slot.type != ToolType.text) {
+      entries.add(const PopupMenuDivider());
+      entries.add(
+        PopupMenuItem<_ToolMenuAction>(
+          enabled: false,
+          child: Text(
+            'Thickness',
+            style: TextStyle(
+              fontSize: 12,
+              color: Colors.white.withValues(alpha: .55),
+            ),
+          ),
+        ),
+      );
+      for (final width in toolWidthOptions) {
+        entries.add(
+          PopupMenuItem<_ToolMenuAction>(
+            value: _ToolMenuAction.thickness(slot, width),
+            child: Row(
+              children: [
+                SizedBox(
+                  width: 54,
+                  child: Container(
+                    height: width.clamp(2, 8).toDouble(),
+                    decoration: BoxDecoration(
+                      color: Theme.of(context).colorScheme.primary,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Text('${width.round()} px'),
+                const Spacer(),
+                if ((slot.thickness - width).abs() < .01)
+                  const Icon(Icons.check, size: 16),
+              ],
+            ),
+          ),
+        );
+      }
+    } else {
+      entries.add(const PopupMenuDivider());
+      entries.add(
+        PopupMenuItem<_ToolMenuAction>(
+          enabled: false,
+          child: Text(
+            'Text size',
+            style: TextStyle(
+              fontSize: 12,
+              color: Colors.white.withValues(alpha: .55),
+            ),
+          ),
+        ),
+      );
+      for (final size in const <double>[18, 24, 32, 48, 64]) {
+        entries.add(
+          PopupMenuItem<_ToolMenuAction>(
+            value: _ToolMenuAction.fontSize(slot, size),
+            child: Row(
+              children: [
+                Text('${size.round()} px'),
+                const Spacer(),
+                if ((slot.fontSize - size).abs() < .01)
+                  const Icon(Icons.check, size: 16),
+              ],
+            ),
+          ),
+        );
+      }
+      entries.add(const PopupMenuDivider());
+      entries.add(
+        PopupMenuItem<_ToolMenuAction>(
+          value: _ToolMenuAction.editPhrase(slot),
+          child: Text(slot.presetText == null ? 'Set a phrase…' : 'Edit phrase…'),
+        ),
+      );
+    }
+
+    if (slot.type == ToolType.rectangle) {
+      entries.add(const PopupMenuDivider());
+      entries.add(
+        PopupMenuItem<_ToolMenuAction>(
+          value: _ToolMenuAction.fill(slot, !slot.filled),
+          child: Text(slot.filled ? 'Switch to outline' : 'Switch to filled'),
+        ),
+      );
+    }
+
+    entries.add(const PopupMenuDivider());
+    entries.add(
+      PopupMenuItem<_ToolMenuAction>(
+        value: _ToolMenuAction.hide(slot),
+        child: const Text('Hide from toolbar'),
+      ),
+    );
+    return entries;
+  }
+
   void _handleKey(KeyEvent event) {
     if (_isShiftLogicalKey(event.logicalKey)) {
       _syncShiftPressed();
@@ -3235,6 +4265,10 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
     if (event is KeyDownEvent &&
         event.logicalKey == LogicalKeyboardKey.escape) {
       _commitPendingCandle();
+      if (_selectedDrawable != null) {
+        _clearSelection();
+        return;
+      }
       if (_isPanningBoard) {
         final reverted = _panBase;
         setState(() {
@@ -3250,6 +4284,13 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
           }
         });
       }
+      return;
+    }
+    if (event is KeyDownEvent &&
+        _selectedDrawable != null &&
+        (event.logicalKey == LogicalKeyboardKey.delete ||
+            event.logicalKey == LogicalKeyboardKey.backspace)) {
+      _deleteSelectedDrawable();
       return;
     }
     if (event is! KeyDownEvent) return;
@@ -3337,12 +4378,12 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
       CanvasMode.blackboard => Colors.black,
     };
     final annotationActive =
-        (_hasDrawingTool || _isHandSelected) &&
+        (_hasDrawingTool || _isHandSelected || _isSelectSelected) &&
         _sidebarOpen &&
         !_isMagnifierSelected &&
         !_isPointerMode;
     final toolCursorKind = annotationActive
-        ? (_isHandSelected
+        ? (_isHandSelected || _isSelectSelected
               ? null
               : _isEraserSelected
               ? ToolCursorKind.eraser
@@ -3453,6 +4494,9 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
                                   : Offset.zero,
                               boardFocused: _isBoardFocused,
                               boardGap: kBoardSlideGap,
+                              selectedBox: _isSelectSelected
+                                  ? _selectedScreenBox
+                                  : null,
                             ),
                             child: const SizedBox.expand(),
                           ),
@@ -3491,6 +4535,39 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
                       ),
                     ),
                   ),
+                if (_isSelectSelected && _selectedScreenBox != null)
+                  Builder(
+                    builder: (context) {
+                      final box = _selectedScreenBox!;
+                      final drawable = _activeDrawables[_selectedDrawableIndex];
+                      final viewport = MediaQuery.of(context).size;
+                      const barHeight = 60.0;
+                      const barWidth = 400.0;
+                      final maxLeft = math.max(8.0, viewport.width - barWidth - 8);
+                      final left = box.left.clamp(8.0, maxLeft).toDouble();
+                      var top = box.bottom + 8;
+                      if (top + barHeight > viewport.height - 8) {
+                        top = box.top - barHeight - 8;
+                      }
+                      if (top < 8) top = box.bottom + 8;
+                      return Positioned(
+                        key: _selectionBarKey,
+                        left: left,
+                        top: top,
+                        child: KeyedSubtree(
+                          key: const ValueKey('selection-controls'),
+                          child: _SelectionControls(
+                            drawable: drawable,
+                            quickColors: _quickColors,
+                            onColor: _recolorSelectedDrawable,
+                            onSize: _rescaleSelectedDrawable,
+                            onDuplicate: _duplicateSelectedDrawable,
+                            onDelete: _deleteSelectedDrawable,
+                          ),
+                        ),
+                      );
+                    },
+                  ),
                 if (_sidebarOpen)
                   _toolbarPositioned(
                     child: KeyedSubtree(
@@ -3506,6 +4583,8 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
                         selectedColor: _selectedSlot?.color,
                         magnifierZoom: _magnifierZoom,
                         magnifierSize: _magnifierSize,
+                        hiddenSlotIds: _hiddenSlotIds,
+                        hiddenModes: _hiddenModes,
                         onDrag: () => unawaited(_dragToolbar()),
                         onDock: _setToolbarDock,
                         onOverlayMenuOpen: () =>
@@ -3515,6 +4594,8 @@ class _AnnotationWorkspaceState extends State<AnnotationWorkspace>
                         onPointer: _selectPointerMode,
                         onMode: _selectMode,
                         onSlot: _toggleSlot,
+                        onSelect: _selectTool,
+                        onToolMenu: _showToolMenu,
                         onHand: _selectHand,
                         onEraser: _selectEraser,
                         onMagnifier: _selectMagnifier,
@@ -3634,6 +4715,7 @@ class AnnotationPainter extends CustomPainter {
     this.boardCamera = Offset.zero,
     this.boardFocused = true,
     this.boardGap = kBoardSlideGap,
+    this.selectedBox,
   });
 
   final List<Drawable> drawables;
@@ -3662,6 +4744,10 @@ class AnnotationPainter extends CustomPainter {
   final bool boardFocused;
   final double boardGap;
 
+  /// Select-tool frame, already in window coordinates so it sits above the
+  /// board camera. Null when nothing is selected.
+  final Rect? selectedBox;
+
   BoardSlide? get _activeBoardSlide {
     final slides = boardSlides;
     if (slides == null || slides.isEmpty) return null;
@@ -3689,6 +4775,8 @@ class AnnotationPainter extends CustomPainter {
       _paintDraft(canvas);
       canvas.restore();
     }
+    final selection = selectedBox;
+    if (selection != null) _paintSelection(canvas, selection);
     if (showPointer && pointerPosition != null) {
       final halo = Paint()
         ..color = const Color(0xff35a7ff).withValues(alpha: .22);
@@ -3739,6 +4827,50 @@ class AnnotationPainter extends CustomPainter {
         toolCursorKind!,
         toolCursorColor,
       );
+    }
+  }
+
+  /// Dashed frame with a corner handle on each corner of the selection.
+  void _paintSelection(Canvas canvas, Rect box) {
+    final frame = box.inflate(4);
+    final border = Paint()
+      ..color = const Color(0xff35a7ff)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2;
+    _paintDashedLine(canvas, frame.topLeft, frame.topRight, border);
+    _paintDashedLine(canvas, frame.topRight, frame.bottomRight, border);
+    _paintDashedLine(canvas, frame.bottomRight, frame.bottomLeft, border);
+    _paintDashedLine(canvas, frame.bottomLeft, frame.topLeft, border);
+    final fill = Paint()..color = Colors.white;
+    const half = 5.0;
+    for (final corner in <Offset>[
+      frame.topLeft,
+      frame.topRight,
+      frame.bottomLeft,
+      frame.bottomRight,
+    ]) {
+      final handle = Rect.fromCenter(
+        center: corner,
+        width: half * 2,
+        height: half * 2,
+      );
+      canvas.drawRect(handle, fill);
+      canvas.drawRect(handle, border);
+    }
+  }
+
+  void _paintDashedLine(Canvas canvas, Offset from, Offset to, Paint paint) {
+    const dash = 7.0;
+    const gap = 5.0;
+    final delta = to - from;
+    final total = delta.distance;
+    if (total < 1) return;
+    final step = delta / total;
+    var distance = 0.0;
+    while (distance < total) {
+      final end = math.min(distance + dash, total);
+      canvas.drawLine(from + step * distance, from + step * end, paint);
+      distance += dash + gap;
     }
   }
 
@@ -4421,6 +5553,8 @@ class _Sidebar extends StatelessWidget {
     required this.selectedColor,
     required this.magnifierZoom,
     required this.magnifierSize,
+    required this.hiddenSlotIds,
+    required this.hiddenModes,
     required this.onDrag,
     required this.onDock,
     required this.onOverlayMenuOpen,
@@ -4428,6 +5562,8 @@ class _Sidebar extends StatelessWidget {
     required this.onPointer,
     required this.onMode,
     required this.onSlot,
+    required this.onSelect,
+    required this.onToolMenu,
     required this.onHand,
     required this.onEraser,
     required this.onMagnifier,
@@ -4457,6 +5593,8 @@ class _Sidebar extends StatelessWidget {
   final Color? selectedColor;
   final MagnifierZoom magnifierZoom;
   final MagnifierSize magnifierSize;
+  final Set<String> hiddenSlotIds;
+  final Set<String> hiddenModes;
   final VoidCallback onDrag;
   final ValueChanged<ToolbarDock> onDock;
   final VoidCallback onOverlayMenuOpen;
@@ -4464,6 +5602,10 @@ class _Sidebar extends StatelessWidget {
   final VoidCallback onPointer;
   final ValueChanged<CanvasMode> onMode;
   final ValueChanged<ToolSlot> onSlot;
+  final VoidCallback onSelect;
+
+  /// Right-click on a tool: show its options at that screen position.
+  final void Function(ToolSlot slot, Offset position) onToolMenu;
   final VoidCallback onHand;
   final VoidCallback onEraser;
   final VoidCallback onMagnifier;
@@ -4509,6 +5651,14 @@ class _Sidebar extends StatelessWidget {
       }
     }
     final vertical = dock.isVertical;
+    final pointerVisible = !hiddenModes.contains('pointer');
+    final handVisible = !hiddenModes.contains('hand');
+    final eraserVisible = !hiddenModes.contains('eraser');
+    final magnifierVisible = !hiddenModes.contains('magnifier');
+    final selectVisible = !hiddenModes.contains('select');
+    final visibleSlots = slots
+        .where((slot) => !hiddenSlotIds.contains(slot.id))
+        .toList(growable: false);
     final children = <Widget>[
       _ToolbarDragHandle(
         onDrag: onDrag,
@@ -4517,13 +5667,14 @@ class _Sidebar extends StatelessWidget {
         onOverlayMenuOpen: onOverlayMenuOpen,
         onOverlayMenuClose: onOverlayMenuClose,
       ),
-      _ToolIcon(
-        icon: Icons.mouse_outlined,
-        label: 'Pointer / desktop (Ctrl+Shift+P)',
-        selected: activeSlotId == kPointerSlotId,
-        onPressed: onPointer,
-        compact: true,
-      ),
+      if (pointerVisible)
+        _ToolIcon(
+          icon: Icons.mouse_outlined,
+          label: 'Pointer / desktop (Ctrl+Shift+P)',
+          selected: activeSlotId == kPointerSlotId,
+          onPressed: onPointer,
+          compact: true,
+        ),
       const Divider(height: 10, color: Colors.white24),
       for (final item in CanvasMode.values)
         _ToolIcon(
@@ -4534,7 +5685,16 @@ class _Sidebar extends StatelessWidget {
           compact: true,
         ),
       const Divider(height: 10, color: Colors.white24),
-      for (final slot in slots)
+      if (selectVisible)
+        _ToolIcon(
+          buttonKey: const ValueKey('tool-select'),
+          icon: Icons.near_me_outlined,
+          label: 'Select (tap a drawing to move, resize, or restyle it)',
+          selected: activeSlotId == kSelectSlotId,
+          onPressed: onSelect,
+          compact: true,
+        ),
+      for (final slot in visibleSlots)
         Padding(
           padding: EdgeInsets.only(
             bottom: vertical ? 2 : 0,
@@ -4564,6 +5724,7 @@ class _Sidebar extends StatelessWidget {
             color: slot.color,
             onPressed: () => onSlot(slot),
             badge: slot.toolbarBadge,
+            onSecondaryTap: (offset) => onToolMenu(slot, offset),
           ),
         ),
       if (selectedSlot != null)
@@ -4581,25 +5742,28 @@ class _Sidebar extends StatelessWidget {
         compact: true,
       ),
       const Divider(height: 10, color: Colors.white24),
-      _ToolIcon(
-        buttonKey: const ValueKey('tool-hand'),
-        icon: Icons.pan_tool_outlined,
-        label: 'Hand (drag to move the board)',
-        selected: activeSlotId == kHandSlotId,
-        onPressed: onHand,
-      ),
-      _ToolIcon(
-        iconWidget: const _EraserIcon(),
-        label: 'Eraser (click or drag over objects)',
-        selected: activeSlotId == '__eraser__',
-        onPressed: onEraser,
-      ),
-      _ToolIcon(
-        iconWidget: const _MagnifierIcon(),
-        label: 'Magnifier',
-        selected: activeSlotId == '__magnifier__',
-        onPressed: onMagnifier,
-      ),
+      if (handVisible)
+        _ToolIcon(
+          buttonKey: const ValueKey('tool-hand'),
+          icon: Icons.pan_tool_outlined,
+          label: 'Hand (drag to move the board)',
+          selected: activeSlotId == kHandSlotId,
+          onPressed: onHand,
+        ),
+      if (eraserVisible)
+        _ToolIcon(
+          iconWidget: const _EraserIcon(),
+          label: 'Eraser (click or drag over objects)',
+          selected: activeSlotId == '__eraser__',
+          onPressed: onEraser,
+        ),
+      if (magnifierVisible)
+        _ToolIcon(
+          iconWidget: const _MagnifierIcon(),
+          label: 'Magnifier',
+          selected: activeSlotId == '__magnifier__',
+          onPressed: onMagnifier,
+        ),
       if (activeSlotId == '__magnifier__')
         _MagnifierControls(
           zoom: magnifierZoom,
@@ -5091,6 +6255,7 @@ class _ToolIcon extends StatelessWidget {
     this.compact = false,
     this.badge,
     this.enabled = true,
+    this.onSecondaryTap,
   }) : assert(icon != null || iconWidget != null);
 
   final IconData? icon;
@@ -5103,6 +6268,9 @@ class _ToolIcon extends StatelessWidget {
   final bool compact;
   final String? badge;
   final bool enabled;
+
+  /// Right-click handler. Left-click behaviour is unchanged when null.
+  final ValueChanged<Offset>? onSecondaryTap;
 
   @override
   Widget build(BuildContext context) => Semantics(
@@ -5124,6 +6292,9 @@ class _ToolIcon extends StatelessWidget {
             child: InkWell(
               borderRadius: BorderRadius.circular(8),
               onTap: enabled ? onPressed : null,
+              onSecondaryTapDown: onSecondaryTap == null
+                  ? null
+                  : (details) => onSecondaryTap!(details.globalPosition),
               child: Stack(
                 alignment: Alignment.center,
                 children: [
@@ -5235,16 +6406,21 @@ class _SlotControls extends StatelessWidget {
 }
 
 class _WidthSelector extends StatelessWidget {
-  const _WidthSelector({required this.value, required this.onChanged});
+  const _WidthSelector({
+    required this.value,
+    required this.onChanged,
+    this.buttonKey = const ValueKey('width-selector'),
+  });
 
   final double value;
   final ValueChanged<double> onChanged;
+  final Key buttonKey;
 
   @override
   Widget build(BuildContext context) {
     final roundedValue = value.round();
     return PopupMenuButton<double>(
-      key: const ValueKey('width-selector'),
+      key: buttonKey,
       tooltip: 'Stroke width: $roundedValue px',
       initialValue: toolWidthOptions.contains(value) ? value : null,
       onSelected: onChanged,
@@ -5293,16 +6469,21 @@ class _WidthSelector extends StatelessWidget {
 }
 
 class _FontSizeSelector extends StatelessWidget {
-  const _FontSizeSelector({required this.value, required this.onChanged});
+  const _FontSizeSelector({
+    required this.value,
+    required this.onChanged,
+    this.buttonKey = const ValueKey('font-size-selector'),
+  });
 
   static const sizes = <double>[18, 24, 32, 48, 64];
 
   final double value;
   final ValueChanged<double> onChanged;
+  final Key buttonKey;
 
   @override
   Widget build(BuildContext context) => PopupMenuButton<double>(
-    key: const ValueKey('font-size-selector'),
+    key: buttonKey,
     tooltip: 'Text size: ${value.round()} px',
     initialValue: sizes.contains(value) ? value : null,
     onSelected: onChanged,
@@ -5417,6 +6598,108 @@ Color _contrastFor(Color color) =>
 
 String _colorHex(Color color) =>
     '#${(color.toARGB32() & 0x00ffffff).toRadixString(16).padLeft(6, '0').toUpperCase()}';
+
+/// Floating action bar shown under/above the selected drawing: recolour,
+/// change size, duplicate or delete it.
+class _SelectionControls extends StatelessWidget {
+  const _SelectionControls({
+    required this.drawable,
+    required this.quickColors,
+    required this.onColor,
+    required this.onSize,
+    required this.onDuplicate,
+    required this.onDelete,
+  });
+
+  final Drawable drawable;
+  final List<Color> quickColors;
+  final ValueChanged<Color> onColor;
+  final ValueChanged<double> onSize;
+  final VoidCallback onDuplicate;
+  final VoidCallback onDelete;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = drawableColor(drawable);
+    final isText = drawable is TextDrawable;
+    final isCandle = drawable is CandleGroupDrawable;
+    final rawSize = drawableSize(drawable) ?? 4;
+    // Candles store their stroke width; the shared selector speaks about the
+    // tool's thickness, which is four times that.
+    final shownSize = isCandle ? rawSize * 4 : rawSize;
+    return Material(
+      color: const Color(0xff202735),
+      elevation: 8,
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (var i = 0; i < quickColors.length; i++) ...[
+              if (i > 0) const SizedBox(width: 4),
+              _PaletteSwatch(
+                color: quickColors[i],
+                selected: color != null && _sameRgb(color, quickColors[i]),
+                onPressed: () => onColor(quickColors[i]),
+                size: 20,
+              ),
+            ],
+            const SizedBox(width: 6),
+            Tooltip(
+              message: 'Custom colour',
+              child: SizedBox(
+                width: 30,
+                height: 30,
+                child: IconButton(
+                  padding: EdgeInsets.zero,
+                  icon: Icon(
+                    Icons.palette_outlined,
+                    size: 19,
+                    color: color ?? Colors.white70,
+                  ),
+                  onPressed: () async {
+                    final picked = await showDialog<Color>(
+                      context: context,
+                      builder: (_) =>
+                          _ColorDialog(initialColor: color ?? Colors.white),
+                    );
+                    if (picked != null) onColor(picked);
+                  },
+                ),
+              ),
+            ),
+            const SizedBox(width: 4),
+            if (isText)
+              _FontSizeSelector(
+                value: shownSize,
+                onChanged: onSize,
+                buttonKey: const ValueKey('selection-font'),
+              )
+            else
+              _WidthSelector(
+                value: shownSize,
+                onChanged: onSize,
+                buttonKey: const ValueKey('selection-width'),
+              ),
+            IconButton(
+              key: const ValueKey('selection-duplicate'),
+              tooltip: 'Duplicate',
+              icon: const Icon(Icons.copy_all_outlined, size: 19),
+              onPressed: onDuplicate,
+            ),
+            IconButton(
+              key: const ValueKey('selection-delete'),
+              tooltip: 'Delete',
+              icon: const Icon(Icons.delete_outline, size: 19),
+              onPressed: onDelete,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
 
 class _PaletteSwatch extends StatelessWidget {
   const _PaletteSwatch({
@@ -5616,6 +6899,53 @@ class _ColorChannelSlider extends StatelessWidget {
   );
 }
 
+/// One entry in a right-click tool menu. Each variant knows how to apply
+/// itself, which keeps the menu builder declarative.
+class _ToolMenuAction {
+  const _ToolMenuAction._(this.kind, this.slot, {this.color, this.value});
+
+  final String kind;
+  final ToolSlot slot;
+  final Color? color;
+  final double? value;
+
+  factory _ToolMenuAction.color(ToolSlot slot, Color color) =>
+      _ToolMenuAction._('color', slot, color: color);
+  factory _ToolMenuAction.customColor(ToolSlot slot) =>
+      _ToolMenuAction._('custom', slot);
+  factory _ToolMenuAction.thickness(ToolSlot slot, double value) =>
+      _ToolMenuAction._('thickness', slot, value: value);
+  factory _ToolMenuAction.fontSize(ToolSlot slot, double value) =>
+      _ToolMenuAction._('fontSize', slot, value: value);
+  factory _ToolMenuAction.fill(ToolSlot slot, bool filled) =>
+      _ToolMenuAction._(filled ? 'fill' : 'outline', slot);
+  factory _ToolMenuAction.editPhrase(ToolSlot slot) =>
+      _ToolMenuAction._('phrase', slot);
+  factory _ToolMenuAction.hide(ToolSlot slot) =>
+      _ToolMenuAction._('hide', slot);
+
+  Future<void> run(_AnnotationWorkspaceState state, ToolSlot target) async {
+    switch (kind) {
+      case 'color':
+        state._applyColor(color!, target);
+      case 'custom':
+        await state._pickColorFor(target);
+      case 'thickness':
+        state._changeThickness(value!, target);
+      case 'fontSize':
+        state._changeFontSize(value!, target);
+      case 'fill':
+        state._changeFill(true, target);
+      case 'outline':
+        state._changeFill(false, target);
+      case 'phrase':
+        await state._editSlotPhrase(target);
+      case 'hide':
+        state._setSlotHidden(target, true);
+    }
+  }
+}
+
 class _SettingSectionTitle extends StatelessWidget {
   const _SettingSectionTitle(this.text);
   final String text;
@@ -5648,6 +6978,13 @@ class _AddSlotDialogState extends State<_AddSlotDialog> {
   double _thickness = 4;
   double _fontSize = 24;
   bool _filled = false;
+  final _phraseController = TextEditingController();
+
+  @override
+  void dispose() {
+    _phraseController.dispose();
+    super.dispose();
+  }
 
   void _selectType(ToolType type) {
     setState(() {
@@ -5715,17 +7052,32 @@ class _AddSlotDialogState extends State<_AddSlotDialog> {
           ],
         ),
         if (_type == ToolType.text)
-          Row(
+          Column(
             children: [
-              const Text('Text size'),
-              Expanded(
-                child: Slider(
-                  value: _fontSize,
-                  min: 12,
-                  max: 72,
-                  divisions: 20,
-                  label: '${_fontSize.round()} px',
-                  onChanged: (value) => setState(() => _fontSize = value),
+              Row(
+                children: [
+                  const Text('Text size'),
+                  Expanded(
+                    child: Slider(
+                      value: _fontSize,
+                      min: 12,
+                      max: 72,
+                      divisions: 20,
+                      label: '${_fontSize.round()} px',
+                      onChanged: (value) => setState(() => _fontSize = value),
+                    ),
+                  ),
+                ],
+              ),
+              TextField(
+                key: const ValueKey('add-slot-phrase'),
+                controller: _phraseController,
+                maxLength: 80,
+                decoration: const InputDecoration(
+                  labelText: 'Phrase to place',
+                  helperText:
+                      'Leave empty to type your own text when you click',
+                  counterText: '',
                 ),
               ),
             ],
@@ -5761,17 +7113,23 @@ class _AddSlotDialogState extends State<_AddSlotDialog> {
         child: const Text('Cancel'),
       ),
       FilledButton(
-        onPressed: () => Navigator.pop(
-          context,
-          ToolSlot(
-            id: 'new',
-            type: _type,
-            color: _color,
-            thickness: _thickness,
-            filled: _filled,
-            fontSize: _fontSize,
-          ),
-        ),
+        onPressed: () {
+          final phrase = _phraseController.text.trim();
+          Navigator.pop(
+            context,
+            ToolSlot(
+              id: 'new',
+              type: _type,
+              color: _color,
+              thickness: _thickness,
+              filled: _filled,
+              fontSize: _fontSize,
+              presetText: _type == ToolType.text && phrase.isNotEmpty
+                  ? phrase
+                  : null,
+            ),
+          );
+        },
         child: const Text('Add'),
       ),
     ],
